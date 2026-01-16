@@ -91,77 +91,73 @@ jobs:
         Get-PowerCLIConfiguration
         Write-Host "PowerCLI test passed"
 
-    - name: Get Microsoft Graph Access Token
+    - name: Get Microsoft Graph Access Token and Drive Info
       shell: pwsh
       run: |
-        Write-Host "Getting Microsoft Graph access token..."
-       
+        Write-Host "=== 获取访问令牌和驱动信息 ==="
+        
+        # 获取访问令牌
         $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
         $body = "client_id=$env:OD_CLIENT_ID&scope=https%3A%2F%2Fgraph.microsoft.com%2F.default&client_secret=$env:OD_CLIENT_SECRET&grant_type=client_credentials"
-       
+        
         try {
             $response = Invoke-WebRequest -Uri $tokenUrl -Method POST -ContentType "application/x-www-form-urlencoded" -Body $body
             $tokenData = $response.Content | ConvertFrom-Json
-           
+            
             if ($tokenData.access_token -and $tokenData.access_token -match '\.[^\.]+\.[^\.]+') {
                 $token = $tokenData.access_token
-                Write-Host "Access token obtained"
-               
+                Write-Host "✓ 访问令牌获取成功"
+                
+                # 保存到临时文件
                 $token | Out-File -FilePath "$env:TEMP\access_token.txt" -Encoding UTF8
-                "ACCESS_TOKEN=$token" | Out-File -FilePath $env:GITHUB_ENV -Append
+                "ACCESS_TOKEN=$token" >> $env:GITHUB_ENV
                 $env:ACCESS_TOKEN = $token
             } else {
-                throw "Invalid token format"
+                throw "令牌格式无效"
             }
         } catch {
-            Write-Host "Failed to get access token: $_"
+            Write-Host "获取访问令牌失败: $_"
             throw
         }
-
-    - name: Test Token and Get Drive Information
-      shell: pwsh
-      run: |
-        Write-Host "Testing token and getting drive information..."
-       
-        $token = $env:ACCESS_TOKEN
-        if ([string]::IsNullOrEmpty($token)) {
-            $tokenFile = "$env:TEMP\access_token.txt"
-            if (Test-Path $tokenFile) {
-                $token = Get-Content -Path $tokenFile -Raw
-            } else {
-                throw "No access token available"
-            }
-        }
-       
+        
+        # 获取驱动和文件夹信息
+        Write-Host ""
+        Write-Host "获取驱动和文件夹信息..."
+        
+        # 解析共享链接
         $encodedLink = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($env:SHARED_LINK)).TrimEnd("=")
         $shareUrl = "https://graph.microsoft.com/v1.0/shares/u!$encodedLink/driveItem"
-       
-        Write-Host "Getting drive info..."
-       
+        
+        Write-Host "共享链接解析URL: $shareUrl"
+        
         try {
             $headers = @{ Authorization = "Bearer $token" }
-            $driveInfo = Invoke-RestMethod -Uri $shareUrl -Headers $headers -Method GET
-           
-            $driveId = $driveInfo.parentReference.driveId
-            $folderPath = $driveInfo.name
-           
-            Write-Host "Drive info obtained"
-            Write-Host "Drive ID: $driveId"
-            Write-Host "Folder: $folderPath"
-           
-            "DRIVE_ID=$driveId" | Out-File -FilePath $env:GITHUB_ENV -Append
-            "FOLDER_NAME=$folderPath" | Out-File -FilePath $env:GITHUB_ENV -Append
-            $env:DRIVE_ID = $driveId
-            $env:FOLDER_NAME = $folderPath
+            $driveItem = Invoke-RestMethod -Uri $shareUrl -Headers $headers -Method GET
+            
+            # ✅ 获取所有必要信息
+            $driveId = $driveItem.parentReference.driveId
+            $folderItemId = $driveItem.id  # ⭐⭐⭐ 文件夹的 itemId
+            $folderName = $driveItem.name
+            
+            Write-Host "✓ 驱动信息获取成功:"
+            Write-Host "  - Drive ID: $driveId"
+            Write-Host "  - Folder Item ID: $folderItemId"
+            Write-Host "  - 文件夹名: $folderName"
+            
+            # 保存到环境变量
+            "DRIVE_ID=$driveId" >> $env:GITHUB_ENV
+            "FOLDER_ITEM_ID=$folderItemId" >> $env:GITHUB_ENV
+            "FOLDER_NAME=$folderName" >> $env:GITHUB_ENV
+            
         } catch {
-            Write-Host "Failed to get drive info: $_"
+            Write-Host "获取驱动信息失败: $_"
             throw
         }
 
     - name: Download ESXi Depot Files
       shell: pwsh
       run: |
-        Write-Host "Downloading ESXi depot files..."
+        Write-Host "=== 下载 ESXi Depot 文件 ==="
        
         $token = $env:ACCESS_TOKEN
         if ([string]::IsNullOrEmpty($token)) {
@@ -192,7 +188,7 @@ jobs:
             $downloadUrl = "https://graph.microsoft.com/v1.0/drives/$($env:DRIVE_ID)/root:/$($env:FOLDER_NAME)/$($file):/content"
             $outFile = Join-Path $TEMP_DIR $file
            
-            Write-Host "Downloading: $file"
+            Write-Host "下载: $file"
            
             try {
                 Invoke-RestMethod -Method GET -Uri $downloadUrl -Headers $headers -OutFile $outFile
@@ -208,10 +204,10 @@ jobs:
         }
        
         if ($successCount -eq 0) {
-            throw "No files downloaded"
+            throw "没有文件下载成功"
         }
        
-        Write-Host "Downloaded $successCount/$($files.Count) files"
+        Write-Host "下载完成: $successCount/$($files.Count) 个文件"
 
     - name: Build Custom ESXi ISO
       shell: pwsh
@@ -226,10 +222,10 @@ jobs:
         Write-Host ""
        
         Import-Module VMware.ImageBuilder
-        Write-Host "ImageBuilder module loaded"
+        Write-Host "ImageBuilder 模块已加载"
        
         Get-EsxSoftwareDepot | ForEach-Object { Remove-EsxSoftwareDepot $_ }
-        Write-Host "Cleared existing depots"
+        Write-Host "已清除现有 depot"
        
         $TEMP_DIR = Join-Path $env:TEMP "depots"
         $baseDepotZip = Join-Path $TEMP_DIR "VMware-ESXi-8.0U3b-24280767-depot.zip"
@@ -244,62 +240,62 @@ jobs:
         )
         $outIso = Join-Path $TEMP_DIR "ESXi-8.0U3b-24280767-RTL8125BG.iso"
        
-        Write-Host "Loading depot files..."
+        Write-Host "加载 depot 文件..."
         Add-EsxSoftwareDepot -Depot $baseDepotZip
         Add-EsxSoftwareDepot -Depot $nvmeDriverZip
         Add-EsxSoftwareDepot -Depot $reDriverZip
         $usbFlingZips | ForEach-Object {
             if (Test-Path $_) { Add-EsxSoftwareDepot -Depot $_ }
         }
-        Write-Host "All depots loaded"
+        Write-Host "所有 depot 已加载"
        
         $baseProfile = Get-EsxImageProfile | Where-Object { $_.Name -eq "ESXi-8.0U3b-24280767-standard" }
         if (-not $baseProfile) {
-            throw "Base image profile ESXi-8.0U3b-24280767-standard not found"
+            throw "未找到基础镜像配置文件: ESXi-8.0U3b-24280767-standard"
         }
        
         $newProfile = New-EsxImageProfile -CloneProfile $baseProfile -Name "ESXi-8.0U3b-24280767-RTL8125BG" -Vendor "Custom"
-        Write-Host "Created custom profile: $($newProfile.Name)"
+        Write-Host "已创建自定义配置文件: $($newProfile.Name)"
        
         $packagesToInject = Get-EsxSoftwarePackage |
             Where-Object { $_.Name -match "re-driver|nvme|vmkusb" } |
             Group-Object -Property Name |
             ForEach-Object { $_.Group | Sort-Object Version -Descending | Select-Object -First 1 }
        
-        Write-Host "Injecting drivers..."
+        Write-Host "注入驱动..."
         foreach ($pkg in $packagesToInject) {
             try {
                 Add-EsxSoftwarePackage -ImageProfile $newProfile -SoftwarePackage $pkg.Name -ErrorAction Stop
-                Write-Host "Injected: $($pkg.Name) $($pkg.Version)"
+                Write-Host "已注入: $($pkg.Name) $($pkg.Version)"
             } catch {
-                Write-Host "Already exists: $($pkg.Name)"
+                Write-Host "已存在: $($pkg.Name)"
             }
         }
        
-        Write-Host "Exporting ISO..."
+        Write-Host "导出 ISO..."
         Export-EsxImageProfile -ImageProfile $newProfile -ExportToIso -FilePath $outIso -Force
        
         if (Test-Path $outIso) {
             $sizeMB = (Get-Item $outIso).Length / 1MB
             Write-Host ""
-            Write-Host "=== Build Complete ==="
-            Write-Host "ISO Path: $outIso"
-            Write-Host "ISO Size: $([math]::Round($sizeMB, 2)) MB"
+            Write-Host "=== 构建完成 ==="
+            Write-Host "ISO 路径: $outIso"
+            Write-Host "ISO 大小: $([math]::Round($sizeMB, 2)) MB"
             Write-Host ""
            
             "ISO_PATH=$outIso" >> $env:GITHUB_ENV
             $env:ISO_PATH = $outIso
         } else {
-            throw "ISO creation failed"
+            throw "ISO 创建失败"
         }
 
-    - name: Upload ISO to OneDrive (Resumable Upload - FIXED)
+    - name: Upload ISO to OneDrive (使用 itemId 方式)
       shell: pwsh
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
         $OutputEncoding = [System.Text.Encoding]::UTF8
        
-        Write-Host "=== 开始可恢复上传 ISO 到 OneDrive (修复版) ==="
+        Write-Host "=== 开始上传 ISO 到 OneDrive (itemId 方式) ==="
         Write-Host ""
 
         # 获取访问令牌
@@ -311,7 +307,7 @@ jobs:
             }
         }
         if ([string]::IsNullOrEmpty($token)) { 
-            throw "没有有效的 access token" 
+            throw "没有有效的访问令牌" 
         }
 
         # 验证 ISO 文件
@@ -325,7 +321,7 @@ jobs:
 
         $isoName = "ESXi-8.0U3b-24280767-RTL8125BG.iso"
         $driveId = $env:DRIVE_ID
-        $folderName = $env:FOLDER_NAME
+        $folderItemId = $env:FOLDER_ITEM_ID
 
         # 获取文件信息
         $fileInfo = Get-Item $isoPath
@@ -333,24 +329,18 @@ jobs:
         Write-Host "ISO 信息:"
         Write-Host "  - 文件名: $isoName"
         Write-Host "  - 文件大小: $([math]::Round($fileSize / 1MB, 2)) MB ($fileSize bytes)"
-        Write-Host "  - 目标文件夹: $folderName"
+        Write-Host "  - Drive ID: $driveId"
+        Write-Host "  - Folder Item ID: $folderItemId"
         Write-Host ""
 
-        # ====================================================
-        # 核心修复：使用 HttpWebRequest 替代 Invoke-RestMethod
-        # ====================================================
-
-        # 创建上传会话
-        Write-Host "正在创建上传会话..."
-        # 🔧 关键修复：对文件夹名和文件名进行URL编码
-        $encodedFolderName = [System.Uri]::EscapeDataString($folderName)
-        $encodedIsoName = [System.Uri]::EscapeDataString($isoName)
-        # 🔧 唯一修改：使用 ${} 包裹变量名以避免PowerShell语法错误
-        $createUrl = "https://graph.microsoft.com/v1.0/drives/$driveId/root:/$encodedFolderName/${encodedIsoName}:/createUploadSession"
+        # ✅ 关键修复：使用 itemId 方式创建上传会话
+        Write-Host "正在创建上传会话 (使用 itemId 方式)..."
         
-        Write-Host "编码后的URL路径："
-        Write-Host "  文件夹: $encodedFolderName"
-        Write-Host "  文件: $encodedIsoName"
+        # ✅ 使用 items/{itemId}: 而不是 root:/path:
+        $createUrl = "https://graph.microsoft.com/v1.0/drives/$driveId/items/$folderItemId:/$isoName:/createUploadSession"
+        
+        Write-Host "创建会话 URL:"
+        Write-Host "  $createUrl"
         Write-Host ""
 
         $headers = @{
@@ -371,6 +361,13 @@ jobs:
             Write-Host "  - 会话 URL: $($uploadUrl.Substring(0, 80))..."
         } catch {
             Write-Error "创建上传会话失败: $($_.Exception.Message)"
+            if ($_.Exception.Response) {
+                $errorStream = $_.Exception.Response.GetResponseStream()
+                $reader = New-Object System.IO.StreamReader($errorStream)
+                $errorBody = $reader.ReadToEnd()
+                $reader.Close()
+                Write-Host "错误响应: $errorBody"
+            }
             throw
         }
 
@@ -412,9 +409,7 @@ jobs:
                 Write-Host "  - 实际读取: $bytesRead bytes"
                 Write-Host "  - 进度: $([math]::Round(($rangeEnd + 1) / $fileSize * 100, 2))%"
 
-                # ====================================================
-                # 核心修复：使用 HttpWebRequest 替代 Invoke-RestMethod
-                # ====================================================
+                # 使用 HttpWebRequest 上传
                 $retryCount = 0
                 $maxRetries = 3
                 $uploadSuccess = $false
@@ -425,12 +420,12 @@ jobs:
                         $request = [System.Net.HttpWebRequest]::Create($uploadUrl)
                         $request.Method = "PUT"
                         $request.ContentType = "application/octet-stream"
-                        $request.ContentLength = $bytesRead  # 关键：设置实际读取的字节数
+                        $request.ContentLength = $bytesRead
                         $request.Headers.Add("Content-Range", $rangeHeader)
                         
                         # 获取请求流并写入数据
                         $reqStream = $request.GetRequestStream()
-                        $reqStream.Write($buffer, 0, $bytesRead)  # 关键：只写入实际读取的部分
+                        $reqStream.Write($buffer, 0, $bytesRead)
                         $reqStream.Close()
                         
                         # 获取响应
@@ -480,7 +475,7 @@ jobs:
             Write-Host "  - 文件: $isoName"
             Write-Host "  - 大小: $([math]::Round($fileSize / 1MB, 2)) MB"
             Write-Host "  - 总块数: $($currentChunk - 1)"
-            Write-Host "  - 目标位置: $folderName"
+            Write-Host "  - 目标位置: OneDrive 文件夹"
             Write-Host "========================================"
 
         } catch {
