@@ -1,0 +1,562 @@
+name: Build ESXi ISO (Cloud Only)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * 0" # 每周日 UTC 0点 执行
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    env:
+      OD_CLIENT_ID: ${{ secrets.OD_CLIENT_ID }}
+      OD_CLIENT_SECRET: ${{ secrets.OD_CLIENT_SECRET }}
+      OD_TENANT_ID: ${{ secrets.OD_TENANT_ID }}
+      SHARED_LINK: "https://xs9888outlook-my.sharepoint.com/my?id=%2Fpersonal%2Fx%5Fxs9888outlook%5Fonmicrosoft%5Fcom%2FDocuments%2FESXi%2DCustom%2DISO&viewid=5f3047b5-37d1-41fc-8f65-d63151c422ca"
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.AUTH_PAT }}
+
+    - name: Install Python Modules
+      shell: pwsh
+      run: |
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        $OutputEncoding = [System.Text.Encoding]::UTF8
+       
+        Write-Host "=== Install Python Modules ==="
+        $pythonPath = "C:\hostedtoolcache\windows\Python\3.12.10\x64\python.exe"
+       
+        Write-Host "Python Path: $pythonPath"
+        & $pythonPath --version
+       
+        Write-Host "Installing required modules..."
+        & $pythonPath -m pip install --upgrade pip
+        & $pythonPath -m pip install six lxml psutil pyopenssl
+       
+        Write-Host "Verifying modules..."
+        & $pythonPath -c "import six; import lxml; import psutil; import OpenSSL; print('All Python modules verified successfully')"
+       
+        "PYTHON_PATH=$pythonPath" >> $env:GITHUB_ENV
+
+    - name: Install VMware PowerCLI
+      shell: pwsh
+      run: |
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+       
+        Write-Host "=== Install VMware PowerCLI ==="
+        Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+       
+        Write-Host "Installing PowerCLI..."
+        Install-Module -Name VMware.PowerCLI -Scope CurrentUser -Force -AllowClobber
+       
+        Write-Host "Verifying installation..."
+        Get-Module -ListAvailable VMware.PowerCLI | Select-Object Name, Version
+
+    - name: Configure PowerCLI
+      shell: pwsh
+      run: |
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+       
+        Write-Host "=== Configure PowerCLI ==="
+       
+        $pythonPath = $env:PYTHON_PATH
+        if (-not $pythonPath) {
+            $pythonPath = "C:\hostedtoolcache\windows\Python\3.12.10\x64\python.exe"
+        }
+       
+        Write-Host "Setting Python Path: $pythonPath"
+        Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $false -PythonPath $pythonPath -Confirm:$false
+       
+        Write-Host "Verifying configuration..."
+        $config = Get-PowerCLIConfiguration
+        Write-Host "PythonPath: $($config.PythonPath)"
+        Write-Host "Configuration completed"
+
+    - name: Test PowerCLI
+      shell: pwsh
+      run: |
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+       
+        Write-Host "=== Test PowerCLI ==="
+       
+        Write-Host "Importing ImageBuilder module..."
+        Import-Module VMware.ImageBuilder -ErrorAction Stop
+        Write-Host "ImageBuilder imported successfully"
+       
+        Write-Host "Testing PowerCLI commands..."
+        Get-PowerCLIConfiguration
+        Write-Host "PowerCLI test passed"
+
+    - name: Get Microsoft Graph Access Token
+      shell: pwsh
+      run: |
+        Write-Host "Getting Microsoft Graph access token..."
+       
+        $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
+        $body = "client_id=$env:OD_CLIENT_ID&scope=https%3A%2F%2Fgraph.microsoft.com%2F.default&client_secret=$env:OD_CLIENT_SECRET&grant_type=client_credentials"
+       
+        try {
+            $response = Invoke-WebRequest -Uri $tokenUrl -Method POST -ContentType "application/x-www-form-urlencoded" -Body $body
+            $tokenData = $response.Content | ConvertFrom-Json
+           
+            if ($tokenData.access_token -and $tokenData.access_token -match '\.[^\.]+\.[^\.]+') {
+                $token = $tokenData.access_token
+                Write-Host "Access token obtained"
+               
+                $token | Out-File -FilePath "$env:TEMP\access_token.txt" -Encoding UTF8
+                "ACCESS_TOKEN=$token" | Out-File -FilePath $env:GITHUB_ENV -Append
+                $env:ACCESS_TOKEN = $token
+            } else {
+                throw "Invalid token format"
+            }
+        } catch {
+            Write-Host "Failed to get access token: $_"
+            throw
+        }
+
+    - name: Test Token and Get Drive Information
+      shell: pwsh
+      run: |
+        Write-Host "Testing token and getting drive information..."
+       
+        $token = $env:ACCESS_TOKEN
+        if ([string]::IsNullOrEmpty($token)) {
+            $tokenFile = "$env:TEMP\access_token.txt"
+            if (Test-Path $tokenFile) {
+                $token = Get-Content -Path $tokenFile -Raw
+            } else {
+                throw "No access token available"
+            }
+        }
+       
+        $encodedLink = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($env:SHARED_LINK)).TrimEnd("=")
+        $shareUrl = "https://graph.microsoft.com/v1.0/shares/u!$encodedLink/driveItem"
+       
+        Write-Host "Getting drive info..."
+       
+        try {
+            $headers = @{ Authorization = "Bearer $token" }
+            $driveInfo = Invoke-RestMethod -Uri $shareUrl -Headers $headers -Method GET
+           
+            $driveId = $driveInfo.parentReference.driveId
+            $folderPath = $driveInfo.name
+           
+            Write-Host "Drive info obtained"
+            Write-Host "Drive ID: $driveId"
+            Write-Host "Folder: $folderPath"
+           
+            "DRIVE_ID=$driveId" | Out-File -FilePath $env:GITHUB_ENV -Append
+            "FOLDER_NAME=$folderPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+            $env:DRIVE_ID = $driveId
+            $env:FOLDER_NAME = $folderPath
+        } catch {
+            Write-Host "Failed to get drive info: $_"
+            throw
+        }
+
+    - name: Download ESXi Depot Files
+      shell: pwsh
+      run: |
+        Write-Host "Downloading ESXi depot files..."
+       
+        $token = $env:ACCESS_TOKEN
+        if ([string]::IsNullOrEmpty($token)) {
+            $tokenFile = "$env:TEMP\access_token.txt"
+            if (Test-Path $tokenFile) {
+                $token = Get-Content -Path $tokenFile -Raw
+            }
+        }
+       
+        $TEMP_DIR = Join-Path $env:TEMP "depots"
+        New-Item -ItemType Directory -Path $TEMP_DIR -Force | Out-Null
+       
+        $files = @(
+            "VMware-ESXi-8.0U3b-24280767-depot.zip",
+            "nvme-community-driver_1.0.1.0-3vmw.700.1.0.15843807-component-18902434.zip",
+            "VMware-Re-Driver_1.101.01-5vmw.800.1.0.20613240.zip",
+            "ESXi800-VMKUSB-NIC-FLING-64098182-component-21668107.zip",
+            "ESXi803-VMKUSB-NIC-FLING-76444229-component-24179899.zip",
+            "ESXi80U1-VMKUSB-NIC-FLING-64098092-component-21669994.zip",
+            "ESXi80U2-VMKUSB-NIC-FLING-67561870-component-22416446.zip",
+            "ESXi80U3-VMKUSB-NIC-FLING-75399077-component-24052746.zip"
+        )
+       
+        $headers = @{ Authorization = "Bearer $token" }
+        $successCount = 0
+       
+        foreach ($file in $files) {
+            $downloadUrl = "https://graph.microsoft.com/v1.0/drives/$($env:DRIVE_ID)/root:/$($env:FOLDER_NAME)/$($file):/content"
+            $outFile = Join-Path $TEMP_DIR $file
+           
+            Write-Host "Downloading: $file"
+           
+            try {
+                Invoke-RestMethod -Method GET -Uri $downloadUrl -Headers $headers -OutFile $outFile
+               
+                if (Test-Path $outFile) {
+                    $fileSize = (Get-Item $outFile).Length / 1MB
+                    $successCount++
+                    Write-Host "✓ $file ($([math]::Round($fileSize, 2)) MB)"
+                }
+            } catch {
+                Write-Host "✗ $file - $($_.Exception.Message)"
+            }
+        }
+       
+        if ($successCount -eq 0) {
+            throw "No files downloaded"
+        }
+       
+        Write-Host "Downloaded $successCount/$($files.Count) files"
+
+    - name: Build Custom ESXi ISO
+      shell: pwsh
+      run: |
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        $OutputEncoding = [System.Text.Encoding]::UTF8
+       
+        Write-Host ""
+        Write-Host "================================================"
+        Write-Host "ESXi 8.0U3b + RTL8125BG + NVMe + USB NIC"
+        Write-Host "================================================"
+        Write-Host ""
+       
+        Import-Module VMware.ImageBuilder
+        Write-Host "ImageBuilder module loaded"
+       
+        Get-EsxSoftwareDepot | ForEach-Object { Remove-EsxSoftwareDepot $_ }
+        Write-Host "Cleared existing depots"
+       
+        $TEMP_DIR = Join-Path $env:TEMP "depots"
+        $baseDepotZip = Join-Path $TEMP_DIR "VMware-ESXi-8.0U3b-24280767-depot.zip"
+        $nvmeDriverZip = Join-Path $TEMP_DIR "nvme-community-driver_1.0.1.0-3vmw.700.1.0.15843807-component-18902434.zip"
+        $reDriverZip = Join-Path $TEMP_DIR "VMware-Re-Driver_1.101.01-5vmw.800.1.0.20613240.zip"
+        $usbFlingZips = @(
+            (Join-Path $TEMP_DIR "ESXi800-VMKUSB-NIC-FLING-64098182-component-21668107.zip"),
+            (Join-Path $TEMP_DIR "ESXi803-VMKUSB-NIC-FLING-76444229-component-24179899.zip"),
+            (Join-Path $TEMP_DIR "ESXi80U1-VMKUSB-NIC-FLING-64098092-component-21669994.zip"),
+            (Join-Path $TEMP_DIR "ESXi80U2-VMKUSB-NIC-FLING-67561870-component-22416446.zip"),
+            (Join-Path $TEMP_DIR "ESXi80U3-VMKUSB-NIC-FLING-75399077-component-24052746.zip")
+        )
+        $outIso = Join-Path $TEMP_DIR "ESXi-8.0U3b-24280767-RTL8125BG.iso"
+       
+        Write-Host "Loading depot files..."
+        Add-EsxSoftwareDepot -Depot $baseDepotZip
+        Add-EsxSoftwareDepot -Depot $nvmeDriverZip
+        Add-EsxSoftwareDepot -Depot $reDriverZip
+        $usbFlingZips | ForEach-Object {
+            if (Test-Path $_) { Add-EsxSoftwareDepot -Depot $_ }
+        }
+        Write-Host "All depots loaded"
+       
+        $baseProfile = Get-EsxImageProfile | Where-Object { $_.Name -eq "ESXi-8.0U3b-24280767-standard" }
+        if (-not $baseProfile) {
+            throw "Base image profile ESXi-8.0U3b-24280767-standard not found"
+        }
+       
+        $newProfile = New-EsxImageProfile -CloneProfile $baseProfile -Name "ESXi-8.0U3b-24280767-RTL8125BG" -Vendor "Custom"
+        Write-Host "Created custom profile: $($newProfile.Name)"
+       
+        $packagesToInject = Get-EsxSoftwarePackage |
+            Where-Object { $_.Name -match "re-driver|nvme|vmkusb" } |
+            Group-Object -Property Name |
+            ForEach-Object { $_.Group | Sort-Object Version -Descending | Select-Object -First 1 }
+       
+        Write-Host "Injecting drivers..."
+        foreach ($pkg in $packagesToInject) {
+            try {
+                Add-EsxSoftwarePackage -ImageProfile $newProfile -SoftwarePackage $pkg.Name -ErrorAction Stop
+                Write-Host "Injected: $($pkg.Name) $($pkg.Version)"
+            } catch {
+                Write-Host "Already exists: $($pkg.Name)"
+            }
+        }
+       
+        Write-Host "Exporting ISO..."
+        Export-EsxImageProfile -ImageProfile $newProfile -ExportToIso -FilePath $outIso -Force
+       
+        if (Test-Path $outIso) {
+            $sizeMB = (Get-Item $outIso).Length / 1MB
+            Write-Host ""
+            Write-Host "=== Build Complete ==="
+            Write-Host "ISO Path: $outIso"
+            Write-Host "ISO Size: $([math]::Round($sizeMB, 2)) MB"
+            Write-Host ""
+           
+            "ISO_PATH=$outIso" >> $env:GITHUB_ENV
+            $env:ISO_PATH = $outIso
+        } else {
+            throw "ISO creation failed"
+        }
+
+    - name: Upload ISO to OneDrive (Resumable Upload - FIXED)
+      shell: pwsh
+      run: |
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        $OutputEncoding = [System.Text.Encoding]::UTF8
+       
+        Write-Host "=== 开始可恢复上传 ISO 到 OneDrive (修复版) ==="
+        Write-Host ""
+
+        # 获取访问令牌
+        $token = $env:ACCESS_TOKEN
+        if ([string]::IsNullOrEmpty($token)) {
+            $tokenFile = "$env:TEMP\access_token.txt"
+            if (Test-Path $tokenFile) {
+                $token = Get-Content -Path $tokenFile -Raw
+            }
+        }
+        if ([string]::IsNullOrEmpty($token)) { 
+            throw "没有有效的 access token" 
+        }
+
+        # 验证 ISO 文件
+        $isoPath = $env:ISO_PATH
+        if ([string]::IsNullOrEmpty($isoPath)) {
+            $isoPath = Join-Path (Join-Path $env:TEMP "depots") "ESXi-8.0U3b-24280767-RTL8125BG.iso"
+        }
+        if (-not (Test-Path $isoPath)) { 
+            throw "ISO 文件不存在: $isoPath" 
+        }
+
+        $isoName = "ESXi-8.0U3b-24280767-RTL8125BG.iso"
+        $driveId = $env:DRIVE_ID
+        $folderName = $env:FOLDER_NAME
+
+        # 获取文件信息
+        $fileInfo = Get-Item $isoPath
+        $fileSize = $fileInfo.Length
+        Write-Host "ISO 信息:"
+        Write-Host "  - 文件名: $isoName"
+        Write-Host "  - 文件大小: $([math]::Round($fileSize / 1MB, 2)) MB ($fileSize bytes)"
+        Write-Host "  - 目标文件夹: $folderName"
+        Write-Host ""
+
+        # ====================================================
+        # 核心修复：使用 HttpWebRequest 替代 Invoke-RestMethod
+        # ====================================================
+
+        # 创建上传会话
+        Write-Host "正在创建上传会话..."
+        # 🔧 关键修复：对文件夹名和文件名进行URL编码
+        $encodedFolderName = [System.Uri]::EscapeDataString($folderName)
+        $encodedIsoName = [System.Uri]::EscapeDataString($isoName)
+        # 🔧 唯一修改：使用 ${} 包裹变量名以避免PowerShell语法错误
+        $createUrl = "https://graph.microsoft.com/v1.0/drives/$driveId/root:/$encodedFolderName/${encodedIsoName}:/createUploadSession"
+        
+        Write-Host "编码后的URL路径："
+        Write-Host "  文件夹: $encodedFolderName"
+        Write-Host "  文件: $encodedIsoName"
+        Write-Host ""
+
+        $headers = @{
+            Authorization = "Bearer $token"
+            "Content-Type" = "application/json"
+        }
+        $bodyJson = @{
+            item = @{
+                "@microsoft.graph.conflictBehavior" = "replace"
+                name = $isoName
+            }
+        } | ConvertTo-Json -Compress
+
+        try {
+            $session = Invoke-RestMethod -Method POST -Uri $createUrl -Headers $headers -Body $bodyJson
+            $uploadUrl = $session.uploadUrl
+            Write-Host "✓ 上传会话创建成功"
+            Write-Host "  - 会话 URL: $($uploadUrl.Substring(0, 80))..."
+        } catch {
+            Write-Error "创建上传会话失败: $($_.Exception.Message)"
+            throw
+        }
+
+        # 分片上传配置
+        $chunkSize = 3276800  # 3.125 MB，320KB 的倍数 (Graph API 推荐)
+        $fileStream = $null
+        $totalChunks = [math]::Ceiling($fileSize / $chunkSize)
+        $currentChunk = 1
+        $bytesUploaded = 0
+
+        Write-Host ""
+        Write-Host "开始分片上传..."
+        Write-Host "  - 分片大小: $([math]::Round($chunkSize / 1MB, 3)) MB"
+        Write-Host "  - 总块数: $totalChunks"
+        Write-Host ""
+
+        try {
+            # 打开文件流
+            $fileStream = [System.IO.File]::OpenRead($isoPath)
+            
+            # 分片上传循环
+            while ($true) {
+                # 读取分片数据
+                $buffer = New-Object byte[] $chunkSize
+                $bytesRead = $fileStream.Read($buffer, 0, $chunkSize)
+                
+                if ($bytesRead -eq 0) {
+                    Write-Host "✓ 文件读取完成"
+                    break
+                }
+
+                # 计算当前分片范围
+                $rangeStart = $bytesUploaded
+                $rangeEnd = $bytesUploaded + $bytesRead - 1
+                $rangeHeader = "bytes $rangeStart-$rangeEnd/$fileSize"
+
+                Write-Host "上传分片 [$currentChunk/$totalChunks]:"
+                Write-Host "  - 范围: $rangeHeader"
+                Write-Host "  - 实际读取: $bytesRead bytes"
+                Write-Host "  - 进度: $([math]::Round(($rangeEnd + 1) / $fileSize * 100, 2))%"
+
+                # ====================================================
+                # 核心修复：使用 HttpWebRequest 替代 Invoke-RestMethod
+                # ====================================================
+                $retryCount = 0
+                $maxRetries = 3
+                $uploadSuccess = $false
+
+                do {
+                    try {
+                        # 创建 HttpWebRequest
+                        $request = [System.Net.HttpWebRequest]::Create($uploadUrl)
+                        $request.Method = "PUT"
+                        $request.ContentType = "application/octet-stream"
+                        $request.ContentLength = $bytesRead  # 关键：设置实际读取的字节数
+                        $request.Headers.Add("Content-Range", $rangeHeader)
+                        
+                        # 获取请求流并写入数据
+                        $reqStream = $request.GetRequestStream()
+                        $reqStream.Write($buffer, 0, $bytesRead)  # 关键：只写入实际读取的部分
+                        $reqStream.Close()
+                        
+                        # 获取响应
+                        $response = $request.GetResponse()
+                        $statusCode = [int]$response.StatusCode
+                        $response.Close()
+                        
+                        $uploadSuccess = $true
+                        Write-Host "  - 状态: ✓ 成功 (HTTP $statusCode)"
+                        Write-Host ""
+                        
+                    } catch {
+                        $retryCount++
+                        if ($retryCount -ge $maxRetries) {
+                            Write-Host "  - 状态: ✗ 失败 (尝试 $maxRetries 次后仍然失败)"
+                            Write-Host "  - 错误: $($_.Exception.Message)"
+                            
+                            # 获取详细错误信息
+                            if ($_.Exception.Response) {
+                                $errorStatusCode = $_.Exception.Response.StatusCode
+                                $errorDescription = $_.Exception.Response.StatusDescription
+                                Write-Host "  - HTTP 状态: $errorStatusCode $errorDescription"
+                            }
+                            
+                            throw "分片上传失败: $rangeHeader"
+                        } else {
+                            Write-Host "  - 状态: ⚠️ 重试 $retryCount/$maxRetries (等待 5 秒...)"
+                            Start-Sleep -Seconds 5
+                        }
+                    }
+                } while (-not $uploadSuccess -and $retryCount -lt $maxRetries)
+
+                # 更新进度
+                $bytesUploaded += $bytesRead
+                $currentChunk++
+                
+                # 处理可能的网络延迟
+                if ($currentChunk % 10 -eq 0) {
+                    Start-Sleep -Milliseconds 500
+                }
+            }
+
+            # 上传完成
+            Write-Host ""
+            Write-Host "========================================"
+            Write-Host "上传完成!"
+            Write-Host "  - 文件: $isoName"
+            Write-Host "  - 大小: $([math]::Round($fileSize / 1MB, 2)) MB"
+            Write-Host "  - 总块数: $($currentChunk - 1)"
+            Write-Host "  - 目标位置: $folderName"
+            Write-Host "========================================"
+
+        } catch {
+            Write-Error "上传过程中发生错误: $($_.Exception.Message)"
+            Write-Host ""
+            Write-Host "当前状态:"
+            Write-Host "  - 已上传: $([math]::Round($bytesUploaded / 1MB, 2)) MB / $([math]::Round($fileSize / 1MB, 2)) MB"
+            Write-Host "  - 进度: $([math]::Round($bytesUploaded / $fileSize * 100, 2))%"
+            
+            throw
+        } finally {
+            # 确保文件流关闭
+            if ($fileStream) {
+                $fileStream.Close()
+                $fileStream.Dispose()
+                Write-Host "文件流已关闭"
+            }
+        }
+
+    - name: Check ISO file exists before artifact upload
+      shell: pwsh
+      id: check-artifact
+      run: |
+        Write-Host "=== 检查ISO文件是否存在 ==="
+        
+        # 尝试多个可能的路径
+        $possiblePaths = @(
+            "$env:ISO_PATH",  # 环境变量中的路径
+            "$env:TEMP\depots\ESXi-8.0U3b-24280767-RTL8125BG.iso",
+            "$env:RUNNER_TEMP\depots\ESXi-8.0U3b-24280767-RTL8125BG.iso",
+            "D:\a\_temp\depots\ESXi-8.0U3b-24280767-RTL8125BG.iso"
+        )
+        
+        $foundPath = $null
+        foreach ($path in $possiblePaths) {
+            if ($path -and (Test-Path $path)) {
+                $foundPath = $path
+                $fileSize = (Get-Item $path).Length / 1MB
+                Write-Host "✅ 找到ISO文件: $path ($([math]::Round($fileSize, 2)) MB)"
+                break
+            }
+        }
+        
+        if ($foundPath) {
+            # 输出文件路径供后续步骤使用
+            "artifact_path=$foundPath" >> $env:GITHUB_OUTPUT
+        } else {
+            Write-Host "⚠️ ISO文件不存在，将跳过Artifact上传"
+            Write-Host "OneDrive上传已成功完成，文件已安全存储"
+        }
+
+    - name: Upload to GitHub Artifacts (Conditional)
+      if: steps.check-artifact.outputs.artifact_path != ''
+      uses: actions/upload-artifact@v4
+      id: upload-artifact
+      with:
+        name: ESXi-8.0U3b-RTL8125BG-ISO
+        path: ${{ steps.check-artifact.outputs.artifact_path }}
+        retention-days: 7
+        if-no-files-found: ignore
+
+    # 新增步骤：显示Artifact下载链接
+    - name: Display Artifact Download Link
+      if: steps.upload-artifact.outputs.artifact-id != ''
+      shell: pwsh
+      run: |
+        Write-Host ""
+        Write-Host "========================================"
+        Write-Host "✅ GitHub Artifact 上传完成！"
+        Write-Host "📦 Artifact 名称: ESXi-8.0U3b-RTL8125BG-ISO"
+        Write-Host "🔗 下载链接可在 GitHub Actions 页面查看"
+        Write-Host ""
+        Write-Host "下载方式:"
+        Write-Host "1. 前往此工作流的 Summary 页面"
+        Write-Host "2. 在 'Artifacts' 部分找到 'ESXi-8.0U3b-RTL8125BG-ISO'"
+        Write-Host "3. 点击下载按钮获取 ISO 文件"
+        Write-Host "4. 文件将在 7 天后自动删除"
+        Write-Host "========================================"
+        Write-Host ""
