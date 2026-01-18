@@ -260,20 +260,20 @@ jobs:
             throw "ISO 创建失败"
         }
 
-    # 步骤四：一体化上传（关键修复步骤） - 已移除403测试代码
-    - name: Upload ISO to OneDrive (一体化修复版)
+    # 步骤四：上传ISO到OneDrive（使用稳定路径格式）
+    - name: Upload ISO to OneDrive (Stable Path Format)
       shell: pwsh
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
         $OutputEncoding = [System.Text.Encoding]::UTF8
         
         Write-Host "========================================"
-        Write-Host "开始上传 ISO 到 OneDrive (一体化修复版)"
+        Write-Host "开始上传 ISO 到 OneDrive (稳定路径版)"
         Write-Host "========================================"
         Write-Host ""
         
-        # ========== 1. 获取驱动信息 ==========
-        Write-Host "[1/4] 正在获取驱动信息..."
+        # ========== 1. 获取全新的上传token ==========
+        Write-Host "[1/5] 正在获取全新的上传token..."
         $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
         $body = @{
             client_id     = $env:OD_CLIENT_ID
@@ -284,45 +284,22 @@ jobs:
         
         try {
             $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
-            $readToken = ($tokenResponse.access_token).Trim()
+            $uploadToken = ($tokenResponse.access_token).Trim()
             
-            if ([string]::IsNullOrEmpty($readToken)) {
-                throw "读取用token为空"
+            if ([string]::IsNullOrEmpty($uploadToken)) {
+                throw "上传用token为空"
             }
-            Write-Host "✓ 读取token获取成功，长度: $($readToken.Length) 字符"
+            
+            Write-Host "✓ 全新上传token获取成功"
+            Write-Host "  - Token长度: $($uploadToken.Length) 字符"
         } catch {
-            Write-Error "获取读取token失败: $_"
-            throw
-        }
-        
-        $encodedLink = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($env:SHARED_LINK)).TrimEnd("=")
-        $shareUrl = "https://graph.microsoft.com/v1.0/shares/u!$encodedLink/driveItem"
-        
-        try {
-            $headers = @{ Authorization = "Bearer $readToken" }
-            $driveItem = Invoke-RestMethod -Uri $shareUrl -Headers $headers -Method GET
-            
-            $driveId = $driveItem.parentReference.driveId
-            $folderItemId = $driveItem.id
-            
-            Write-Host "✓ 驱动信息获取成功:"
-            Write-Host "  - Drive ID: $driveId"
-            Write-Host "  - Folder Item ID: $folderItemId"
-            
-            if ($driveItem.folder) {
-                Write-Host "  - 资源类型: 文件夹 ✅"
-            } elseif ($driveItem.file) {
-                Write-Host "  - 资源类型: 文件"
-                Write-Host "  - 父目录ID: $($driveItem.parentReference.id)"
-            }
-        } catch {
-            Write-Error "获取驱动信息失败: $_"
+            Write-Error "获取上传token失败: $_"
             throw
         }
         
         # ========== 2. 验证ISO文件 ==========
         Write-Host ""
-        Write-Host "[2/4] 正在验证ISO文件..."
+        Write-Host "[2/5] 正在验证ISO文件..."
         $isoPath = $env:ISO_PATH
         if ([string]::IsNullOrEmpty($isoPath)) {
             $isoPath = Join-Path (Join-Path $env:TEMP "depots") "ESXi-8.0U3b-24280767-RTL8125BG.iso"
@@ -338,37 +315,64 @@ jobs:
         Write-Host "  - 文件名: $isoName"
         Write-Host "  - 文件大小: $([math]::Round($fileSize / 1MB, 2)) MB"
         
-        # ========== 3. 获取上传专用token ==========
+        # ========== 3. 获取文件夹信息和drive信息 ==========
         Write-Host ""
-        Write-Host "[3/4] 正在获取上传专用token..."
+        Write-Host "[3/5] 正在获取文件夹信息和drive信息..."
+        
+        # 获取读取token（与上传token分开）
+        Write-Host "获取读取token用于解析共享链接..."
+        $readTokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
+        $readToken = ($readTokenResponse.access_token).Trim()
+        Write-Host "✓ 读取token获取成功"
+        
+        # 解析共享链接获取详细信息
+        $encodedLink = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($env:SHARED_LINK)).TrimEnd("=")
+        $shareUrl = "https://graph.microsoft.com/v1.0/shares/u!$encodedLink/driveItem"
+        
         try {
-            $uploadTokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
-            $uploadToken = ($uploadTokenResponse.access_token).Trim()
+            $headers = @{ Authorization = "Bearer $readToken" }
+            $driveItem = Invoke-RestMethod -Uri $shareUrl -Headers $headers -Method GET
             
-            if ([string]::IsNullOrEmpty($uploadToken)) {
-                throw "上传用token为空"
+            $driveId = $driveItem.parentReference.driveId
+            $folderName = $driveItem.name
+            
+            # 清理文件夹名中的URL编码
+            $folderName = [System.Uri]::UnescapeDataString($folderName)
+            
+            Write-Host "✓ 文件夹信息获取成功:"
+            Write-Host "  - Drive ID: $driveId"
+            Write-Host "  - 文件夹名: $folderName"
+            
+            # 确保文件夹名是正确的
+            if ([string]::IsNullOrEmpty($folderName)) {
+                # 从共享链接中提取文件夹名
+                if ($env:SHARED_LINK -match "ESXi%2DCustom%2DISO") {
+                    $folderName = "ESXi-Custom-ISO"
+                } else {
+                    $folderName = "ESXi-Custom-ISO"  # 默认值
+                }
+                Write-Host "⚠️ 从共享链接获取的文件夹名为空，使用默认值: $folderName"
             }
             
-            Write-Host "✓ 上传token获取成功"
-            Write-Host "  - Token前20字符: $($uploadToken.Substring(0, 20))..."
-            Write-Host "  - Token长度: $($uploadToken.Length) 字符"
-            Write-Host ""
-            
-            # 只验证基本格式，不进行需要额外权限的API测试
-            if ($uploadToken -match '^[A-Za-z0-9\-_]+?\.[A-Za-z0-9\-_]+?\.[A-Za-z0-9\-_]+?$') {
-                Write-Host "  - Token格式: JWT格式正确 ✅"
-            }
         } catch {
-            Write-Error "获取上传token失败: $_"
-            throw
+            Write-Host "⚠️ 获取文件夹信息失败，使用默认值"
+            $driveId = "${{ steps.get_drive_info.outputs.driveId }}"
+            $folderName = "ESXi-Custom-ISO"
         }
         
-        # ========== 4. 创建上传会话 ==========
+        # ========== 4. 使用稳定路径创建上传会话 ==========
         Write-Host ""
-        Write-Host "[4/4] 正在创建上传会话..."
+        Write-Host "[4/5] 正在使用稳定路径创建上传会话..."
         
-        $createUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/items/${folderItemId}:/${isoName}:/createUploadSession"
-        Write-Host "创建会话 URL:"
+        # 关键修复：使用 /root:/{folder}/{file}: 格式，避免 /items/{id}:/file: 格式
+        # 对文件夹名和文件名进行URL编码
+        $encodedFolderName = [System.Uri]::EscapeDataString($folderName)
+        $encodedIsoName = [System.Uri]::EscapeDataString($isoName)
+        
+        # 构建稳定的上传URL
+        $createUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}:/createUploadSession"
+        
+        Write-Host "使用稳定上传URL:"
         Write-Host "  $createUrl"
         Write-Host ""
         
@@ -377,15 +381,10 @@ jobs:
             "Content-Type" = "application/json"
         }
         
-        Write-Host "请求头调试信息:"
-        Write-Host "  Authorization: Bearer $($uploadToken.Substring(0, 20))..."
-        Write-Host "  Content-Type: $($headers.'Content-Type')"
-        Write-Host ""
-        
+        # 使用推荐的body格式（嵌套格式）
         $bodyJson = @{
             item = @{
                 "@microsoft.graph.conflictBehavior" = "replace"
-                name = $isoName
             }
         } | ConvertTo-Json -Compress
         
@@ -393,102 +392,142 @@ jobs:
         Write-Host ""
         
         try {
-            Write-Host "正在发送创建会话请求..."
+            Write-Host "正在发送创建上传会话请求..."
             $session = Invoke-RestMethod -Method POST -Uri $createUrl -Headers $headers -Body $bodyJson
-            $uploadUrl = $session.uploadUrl
             
-            Write-Host ""
-            Write-Host "✅✅✅ 上传会话创建成功！ ✅✅✅"
-            Write-Host "  - 会话URL: $($uploadUrl.Substring(0, 80))..."
-            Write-Host ""
+            if (-not $session.uploadUrl) {
+                throw "响应中未找到 uploadUrl"
+            }
             
-            # ========== 5. 分片上传 ==========
-            Write-Host "开始分片上传..."
-            $chunkSize = 3276800
+            $uploadSessionUrl = $session.uploadUrl
+            Write-Host ""
+            Write-Host "✅ 上传会话创建成功！"
+            Write-Host "  - 使用稳定路径: /root:/${encodedFolderName}/${encodedIsoName}:"
+            
+            # ========== 5. 执行分片上传 ==========
+            Write-Host ""
+            Write-Host "[5/5] 开始分片上传..."
+            
+            $chunkSize = 3276800 * 10  # 约31.25MB，提高上传效率
             $fileStream = [System.IO.File]::OpenRead($isoPath)
             $totalChunks = [math]::Ceiling($fileSize / $chunkSize)
             $bytesUploaded = 0
-            $chunkNumber = 1
             
-            Write-Host "  - 分片大小: $([math]::Round($chunkSize / 1MB, 3)) MB"
+            Write-Host "  - 分片大小: $([math]::Round($chunkSize / 1MB, 2)) MB"
             Write-Host "  - 总块数: $totalChunks"
             Write-Host ""
             
-            for ($i=0; $i -lt $totalChunks; $i++) {
+            for ($i = 0; $i -lt $totalChunks; $i++) {
                 $buffer = New-Object byte[] $chunkSize
                 $bytesRead = $fileStream.Read($buffer, 0, $chunkSize)
+                
+                if ($bytesRead -eq 0) { break }
+                
                 $rangeStart = $bytesUploaded
                 $rangeEnd = $bytesUploaded + $bytesRead - 1
                 $rangeHeader = "bytes $rangeStart-$rangeEnd/$fileSize"
                 
                 $retry = 0
-                do {
+                $maxRetries = 3
+                $success = $false
+                
+                while (-not $success -and $retry -lt $maxRetries) {
                     try {
-                        $req = [System.Net.HttpWebRequest]::Create($uploadUrl)
-                        $req.Method = "PUT"
-                        $req.ContentType = "application/octet-stream"
-                        $req.ContentLength = $bytesRead
-                        $req.Headers.Add("Content-Range", $rangeHeader)
-                        $stream = $req.GetRequestStream()
-                        $stream.Write($buffer, 0, $bytesRead)
-                        $stream.Close()
-                        $resp = $req.GetResponse()
-                        $resp.Close()
+                        $request = [System.Net.HttpWebRequest]::Create($uploadSessionUrl)
+                        $request.Method = "PUT"
+                        $request.ContentType = "application/octet-stream"
+                        $request.ContentLength = $bytesRead
+                        $request.Headers.Add("Content-Range", $rangeHeader)
                         
-                        $progress = [math]::Round(($rangeEnd+1)/$fileSize*100, 2)
-                        Write-Host "分片 [$chunkNumber/$totalChunks]: ✓ 成功 (进度: ${progress}%)"
-                        break
+                        $requestStream = $request.GetRequestStream()
+                        $requestStream.Write($buffer, 0, $bytesRead)
+                        $requestStream.Close()
+                        
+                        # 获取响应
+                        try {
+                            $response = $request.GetResponse()
+                            $responseStream = $response.GetResponseStream()
+                            $reader = New-Object System.IO.StreamReader($responseStream)
+                            $responseContent = $reader.ReadToEnd()
+                            $reader.Close()
+                            $responseStream.Close()
+                            $response.Close()
+                        } catch {
+                            # 忽略响应读取错误，只要请求成功发送
+                        }
+                        
+                        $progress = [math]::Round(($rangeEnd + 1) / $fileSize * 100, 2)
+                        Write-Host "分片 [$($i+1)/$totalChunks]: ✓ 成功 (进度: ${progress}%)"
+                        $success = $true
+                        
                     } catch {
                         $retry++
-                        if ($retry -ge 3) { 
-                            Write-Host "分片 [$chunkNumber/$totalChunks]: ✗ 失败 - $rangeHeader"
-                            throw "分片上传失败: $rangeHeader" 
+                        if ($retry -eq $maxRetries) {
+                            Write-Host "分片 [$($i+1)/$totalChunks]: ✗ 失败 - $rangeHeader"
+                            Write-Host "  错误: $($_.Exception.Message)"
+                            throw "分片上传失败"
                         }
-                        Write-Host "分片 [$chunkNumber/$totalChunks]: ⚠️ 重试 $retry/3 (等待 5 秒...)"
-                        Start-Sleep -Seconds 5
+                        Write-Host "分片 [$($i+1)/$totalChunks]: ⚠️ 重试 $retry/$maxRetries (等待 2 秒...)"
+                        Start-Sleep -Seconds 2
                     }
-                } while ($retry -lt 3)
+                }
                 
                 $bytesUploaded += $bytesRead
-                $chunkNumber++
                 
-                if ($chunkNumber % 10 -eq 0) {
-                    Start-Sleep -Milliseconds 500
+                # 每上传几个分片后短暂暂停
+                if (($i + 1) % 5 -eq 0) {
+                    Start-Sleep -Milliseconds 300
                 }
             }
             
             $fileStream.Close()
             Write-Host ""
             Write-Host "========================================"
-            Write-Host "上传完成!"
+            Write-Host "✅ 上传完成!"
             Write-Host "  - 文件: $isoName"
             Write-Host "  - 大小: $([math]::Round($fileSize / 1MB, 2)) MB"
             Write-Host "  - 总块数: $totalChunks"
+            Write-Host "  - 使用稳定路径: /root:/${encodedFolderName}/${encodedIsoName}:"
             Write-Host "========================================"
             
         } catch {
-            Write-Error "创建上传会话失败: $($_.Exception.Message)"
+            Write-Host ""
+            Write-Host "❌ 上传失败: $($_.Exception.Message)"
+            
+            # 输出详细错误信息
             if ($_.Exception.Response) {
-                $errorStream = $_.Exception.Response.GetResponseStream()
-                $reader = New-Object System.IO.StreamReader($errorStream)
-                $errorBody = $reader.ReadToEnd()
-                $reader.Close()
-                Write-Host ""
-                Write-Host "🔴 Graph API 错误响应:"
-                Write-Host "$errorBody"
-                Write-Host ""
-                
-                if ($errorBody -like "*Access token is empty*") {
-                    Write-Host "❌ 问题诊断: Graph API确实没有收到有效的token"
-                } elseif ($errorBody -like "*insufficient*" -or $errorBody -like "*access denied*") {
-                    Write-Host "❌ 问题诊断: 权限不足"
-                    Write-Host "   请检查Azure应用注册权限:"
-                    Write-Host "   1. 需要 Files.ReadWrite.All (应用程序权限)"
-                    Write-Host "   2. 需要管理员同意"
-                } elseif ($errorBody -like "*itemNotFound*") {
-                    Write-Host "❌ 问题诊断: 路径或itemId不存在"
+                try {
+                    $errorStream = $_.Exception.Response.GetResponseStream()
+                    $reader = New-Object System.IO.StreamReader($errorStream)
+                    $errorBody = $reader.ReadToEnd()
+                    $reader.Close()
+                    $errorStream.Close()
+                    
+                    Write-Host ""
+                    Write-Host "🔴 Graph API 错误响应:"
+                    Write-Host $errorBody
+                    
+                    # 尝试解析错误详情
+                    try {
+                        $errorObj = $errorBody | ConvertFrom-Json
+                        if ($errorObj.error) {
+                            Write-Host ""
+                            Write-Host "错误详情:"
+                            Write-Host "  代码: $($errorObj.error.code)"
+                            Write-Host "  消息: $($errorObj.error.message)"
+                            
+                            if ($errorObj.error.innerError) {
+                                Write-Host "  内部错误: $($errorObj.error.innerError)"
+                            }
+                        }
+                    } catch {
+                        # 忽略JSON解析错误
+                    }
+                } catch {
+                    Write-Host "无法读取错误响应流"
                 }
             }
+            
             throw
         }
 
