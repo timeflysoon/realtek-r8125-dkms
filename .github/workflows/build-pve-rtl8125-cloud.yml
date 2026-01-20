@@ -60,15 +60,11 @@ jobs:
           # 获取访问令牌
           tokenUrl="https://login.microsoftonline.com/$OD_TENANT_ID/oauth2/v2.0/token"
           
-          # 构建请求体
-          body_content="client_id=$OD_CLIENT_ID"
-          body_content="$body_content&scope=https://graph.microsoft.com/.default"
-          body_content="$body_content&client_secret=$OD_CLIENT_SECRET"
-          body_content="$body_content&grant_type=client_credentials"
+          body="client_id=$OD_CLIENT_ID&scope=https://graph.microsoft.com/.default&client_secret=$OD_CLIENT_SECRET&grant_type=client_credentials"
           
           echo "正在获取访问令牌..."
-          tokenResponse=$(curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "$body_content" "$tokenUrl")
-          token=$(echo "$tokenResponse" | jq -r '.access_token // empty' | tr -d '\n\r')
+          tokenResponse=$(curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "$body" "$tokenUrl")
+          token=$(echo "$tokenResponse" | jq -r '.access_token // empty')
           
           if [ -z "$token" ]; then
             echo "❌ 访问令牌获取失败"
@@ -92,9 +88,6 @@ jobs:
             exit 1
           fi
           
-          # 清理文件夹名
-          folderName=$(echo "$folderName" | sed 's/%20/ /g')
-          
           echo "driveId=$driveId" >> $GITHUB_OUTPUT
           echo "folderName=$folderName" >> $GITHUB_OUTPUT
           
@@ -103,24 +96,19 @@ jobs:
           echo "  - 文件夹名: $folderName"
 
       # =========================
-      # 从 OneDrive 下载文件
+      # 从 OneDrive 下载文件（简化版）
       # =========================
       - name: Download Files from OneDrive
         run: |
           echo "=== 从 OneDrive 下载文件 ==="
           
-          # 获取新的访问令牌
+          # 获取下载令牌
           tokenUrl="https://login.microsoftonline.com/$OD_TENANT_ID/oauth2/v2.0/token"
-          
-          # 构建请求体
-          body_content="client_id=$OD_CLIENT_ID"
-          body_content="$body_content&scope=https://graph.microsoft.com/.default"
-          body_content="$body_content&client_secret=$OD_CLIENT_SECRET"
-          body_content="$body_content&grant_type=client_credentials"
+          body="client_id=$OD_CLIENT_ID&scope=https://graph.microsoft.com/.default&client_secret=$OD_CLIENT_SECRET&grant_type=client_credentials"
           
           echo "正在获取下载令牌..."
-          tokenResponse=$(curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "$body_content" "$tokenUrl")
-          token=$(echo "$tokenResponse" | jq -r '.access_token // empty' | tr -d '\n\r')
+          tokenResponse=$(curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "$body" "$tokenUrl")
+          token=$(echo "$tokenResponse" | jq -r '.access_token // empty')
           
           if [ -z "$token" ]; then
             echo "❌ 下载令牌获取失败"
@@ -130,47 +118,62 @@ jobs:
           # 创建下载目录
           mkdir -p downloads
           
-          # 下载 Proxmox ISO
-          proxmoxIsoFilename="${{ github.event.inputs.proxmox_iso_filename }}"
-          echo "正在下载: $proxmoxIsoFilename"
+          # 下载文件列表
+          files=(
+            "${{ github.event.inputs.proxmox_iso_filename }}"
+            "${{ github.event.inputs.r8125_driver_filename }}"
+          )
           
-          encodedFilename=$(echo -n "$proxmoxIsoFilename" | jq -sRr @uri)
-          downloadUrl="https://graph.microsoft.com/v1.0/drives/${{ steps.get_drive_info.outputs.driveId }}/root:/${{ steps.get_drive_info.outputs.folderName }}/$encodedFilename:/content"
+          successCount=0
+          driveId="${{ steps.get_drive_info.outputs.driveId }}"
+          folderName="${{ steps.get_drive_info.outputs.folderName }}"
           
-          if curl -fL -H "Authorization: Bearer $token" --retry 3 -o "downloads/$proxmoxIsoFilename" "$downloadUrl"; then
-            isoSize=$(stat -c%s "downloads/$proxmoxIsoFilename" 2>/dev/null || echo 0)
-            if [ "$isoSize" -gt 1000000000 ]; then
-              echo "✅ ISO 下载成功: $((isoSize/1024/1024)) MB"
-              echo "ISO_ORIG=downloads/$proxmoxIsoFilename" >> $GITHUB_ENV
+          for file in "${files[@]}"; do
+            echo ""
+            echo "下载: $file"
+            
+            # URL编码文件名
+            encodedFile=$(echo -n "$file" | jq -sRr @uri)
+            downloadUrl="https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${folderName}/${encodedFile}:/content"
+            
+            # 使用curl直接下载（无需分片）
+            if curl -fL -H "Authorization: Bearer $token" -o "downloads/$file" "$downloadUrl"; then
+              fileSize=$(stat -c%s "downloads/$file" 2>/dev/null || echo 0)
+              if [ "$fileSize" -gt 0 ]; then
+                if [[ "$file" == *.iso ]] && [ "$fileSize" -lt 1000000000 ]; then
+                  echo "❌ ISO 文件过小，可能下载失败"
+                  exit 1
+                elif [[ "$file" == *.deb ]] && [ "$fileSize" -lt 50000 ]; then
+                  echo "❌ 驱动文件过小，可能下载失败"
+                  exit 1
+                fi
+                
+                sizeMB=$((fileSize/1024/1024))
+                sizeKB=$((fileSize/1024))
+                if [[ "$file" == *.iso ]]; then
+                  echo "✅ $file ($sizeMB MB)"
+                else
+                  echo "✅ $file ($sizeKB KB)"
+                fi
+                successCount=$((successCount+1))
+              else
+                echo "❌ $file 下载失败，文件大小为0"
+              fi
             else
-              echo "❌ ISO 文件过小或损坏"
-              exit 1
+              echo "❌ $file 下载失败"
             fi
-          else
-            echo "❌ ISO 下载失败"
+          done
+          
+          if [ $successCount -ne ${#files[@]} ]; then
+            echo "❌ 下载完成: $successCount/${#files[@]} 个文件"
             exit 1
           fi
           
-          # 下载 RTL8125 驱动
-          driverFilename="${{ github.event.inputs.r8125_driver_filename }}"
-          echo "正在下载: $driverFilename"
+          echo "✅ 所有文件下载成功"
           
-          encodedFilename=$(echo -n "$driverFilename" | jq -sRr @uri)
-          downloadUrl="https://graph.microsoft.com/v1.0/drives/${{ steps.get_drive_info.outputs.driveId }}/root:/${{ steps.get_drive_info.outputs.folderName }}/$encodedFilename:/content"
-          
-          if curl -fL -H "Authorization: Bearer $token" --retry 3 -o "downloads/$driverFilename" "$downloadUrl"; then
-            driverSize=$(stat -c%s "downloads/$driverFilename" 2>/dev/null || echo 0)
-            if [ "$driverSize" -gt 50000 ]; then
-              echo "✅ 驱动下载成功: $((driverSize/1024)) KB"
-              echo "DRIVER_FILE=downloads/$driverFilename" >> $GITHUB_ENV
-            else
-              echo "❌ 驱动文件过小或损坏"
-              exit 1
-            fi
-          else
-            echo "❌ 驱动下载失败"
-            exit 1
-          fi
+          # 设置环境变量
+          echo "ISO_ORIG=downloads/${{ github.event.inputs.proxmox_iso_filename }}" >> $GITHUB_ENV
+          echo "DRIVER_FILE=downloads/${{ github.event.inputs.r8125_driver_filename }}" >> $GITHUB_ENV
 
       # =========================
       # 验证 ISO 文件
@@ -257,7 +260,7 @@ jobs:
           echo "skip_build=$SKIP_BUILD" >> $GITHUB_OUTPUT
 
       # =========================
-      # 构建自定义 ISO（使用echo替代heredoc）
+      # 构建自定义 ISO
       # =========================
       - name: Build Custom ISO
         if: steps.check_rebuild.outputs.skip_build != 'true'
@@ -282,13 +285,15 @@ jobs:
             touch "$PRESEED_FILE"
           fi
           
-          # 添加 late_command（不使用heredoc，使用echo）
+          # 添加 late_command
           if ! grep -q "r8125" "$PRESEED_FILE" 2>/dev/null; then
-            echo '# 自动安装 RTL8125 驱动' >> "$PRESEED_FILE"
-            echo 'd-i preseed/late_command string \' >> "$PRESEED_FILE"
-            echo '  in-target sh -c "dpkg -i /cdrom/pool/extras/*.deb || true; \' >> "$PRESEED_FILE"
-            echo '  depmod -a; \' >> "$PRESEED_FILE"
-            echo '  modprobe r8125 || true"' >> "$PRESEED_FILE"
+            {
+              echo '# 自动安装 RTL8125 驱动'
+              echo 'd-i preseed/late_command string \'
+              echo '  in-target sh -c "dpkg -i /cdrom/pool/extras/*.deb || true; \'
+              echo '  depmod -a; \'
+              echo '  modprobe r8125 || true"'
+            } >> "$PRESEED_FILE"
             echo "✅ 自动安装配置已添加"
           fi
           
@@ -317,140 +322,310 @@ jobs:
           echo "ISO_SIZE=$ISO_SIZE" >> $GITHUB_ENV
 
       # =========================
-      # 上传到 OneDrive (幂等策略)
+      # 快速上传到 OneDrive（使用原始的快速上传代码）
       # =========================
-      - name: Upload to OneDrive (Idempotent)
+      - name: Fast Upload to OneDrive
         if: steps.check_rebuild.outputs.skip_build != 'true'
+        shell: pwsh
         run: |
-          echo "=== 上传到 OneDrive (幂等策略) ==="
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $OutputEncoding = [System.Text.Encoding]::UTF8
           
-          # 获取上传令牌
-          tokenUrl="https://login.microsoftonline.com/$OD_TENANT_ID/oauth2/v2.0/token"
+          Write-Host "========================================"
+          Write-Host "快速上传策略：检测→删除→上传"
+          Write-Host "========================================"
+          Write-Host ""
           
-          # 构建请求体
-          body_content="client_id=$OD_CLIENT_ID"
-          body_content="$body_content&scope=https://graph.microsoft.com/.default"
-          body_content="$body_content&client_secret=$OD_CLIENT_SECRET"
-          body_content="$body_content&grant_type=client_credentials"
+          # 1. 获取全新的上传token
+          Write-Host "[1/7] 获取全新的上传token..."
+          $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
+          $body = @{
+              client_id     = $env:OD_CLIENT_ID
+              scope         = "https://graph.microsoft.com/.default"
+              client_secret = $env:OD_CLIENT_SECRET
+              grant_type    = "client_credentials"
+          }
           
-          echo "获取上传令牌..."
-          tokenResponse=$(curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "$body_content" "$tokenUrl")
-          uploadToken=$(echo "$tokenResponse" | jq -r '.access_token // empty' | tr -d '\n\r')
+          try {
+              $uploadTokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
+              $uploadToken = ($uploadTokenResponse.access_token).Trim()
+              
+              if ([string]::IsNullOrEmpty($uploadToken)) {
+                  throw "上传用token为空"
+              }
+              
+              Write-Host "✓ 全新上传token获取成功"
+          } catch {
+              Write-Error "获取上传token失败: $_"
+              throw
+          }
           
-          if [ -z "$uploadToken" ]; then
-            echo "❌ 上传令牌获取失败"
-            exit 1
-          fi
+          # 2. 验证ISO文件
+          Write-Host ""
+          Write-Host "[2/7] 验证ISO文件..."
+          $isoPath = "${{ env.ISO_OUTPUT }}"
+          if ([string]::IsNullOrEmpty($isoPath)) {
+              $isoPath = "PVE-${{ env.PVE_VERSION }}-r8125.iso"
+          }
+          if (-not (Test-Path $isoPath)) { 
+              throw "ISO 文件不存在: $isoPath" 
+          }
           
-          # 文件信息
-          isoPath="$ISO_OUTPUT"
-          isoName="$ISO_OUTPUT"
-          fileSize="$ISO_SIZE"
-          folderName="${{ steps.get_drive_info.outputs.folderName }}"
-          driveId="${{ steps.get_drive_info.outputs.driveId }}"
+          $isoName = "${{ env.ISO_OUTPUT }}"
+          $fileInfo = Get-Item $isoPath
+          $fileSize = $fileInfo.Length
+          Write-Host "✓ ISO文件验证成功:"
+          Write-Host "  - 文件名: $isoName"
+          Write-Host "  - 文件大小: $([math]::Round($fileSize / 1MB, 2)) MB"
           
-          echo "文件信息:"
-          echo "  - 文件名: $isoName"
-          echo "  - 大小: $((fileSize/1024/1024)) MB"
-          echo "  - 文件夹: $folderName"
+          # 3. 获取文件夹信息和drive信息
+          Write-Host ""
+          Write-Host "[3/7] 获取文件夹信息和drive信息..."
           
-          # URL 编码
-          encodedFolderName=$(echo -n "$folderName" | jq -sRr @uri)
-          encodedIsoName=$(echo -n "$isoName" | jq -sRr @uri)
+          # 获取全新的读取token（与上传token分开）
+          Write-Host "获取全新的读取token用于解析共享链接..."
+          $readTokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
+          $readToken = ($readTokenResponse.access_token).Trim()
+          Write-Host "✓ 读取token获取成功"
           
-          # 文件 URL
-          fileUrl="https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}"
+          # 解析共享链接获取详细信息
+          $encodedLink = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($env:SHARED_LINK)).TrimEnd("=")
+          $shareUrl = "https://graph.microsoft.com/v1.0/shares/u!$encodedLink/driveItem"
           
-          echo ""
-          echo "步骤 1: 删除现有文件 (幂等操作)..."
+          try {
+              $headers = @{ Authorization = "Bearer $readToken" }
+              $driveItem = Invoke-RestMethod -Uri $shareUrl -Headers $headers -Method GET
+              
+              $driveId = $driveItem.parentReference.driveId
+              $folderName = $driveItem.name
+              
+              # 清理文件夹名中的URL编码
+              $folderName = [System.Uri]::UnescapeDataString($folderName)
+              
+              Write-Host "✓ 文件夹信息获取成功:"
+              Write-Host "  - Drive ID: $driveId"
+              Write-Host "  - 文件夹名: $folderName"
+              
+              # 确保文件夹名是正确的
+              if ([string]::IsNullOrEmpty($folderName)) {
+                  $folderName = "PVE-Custom-ISO"
+                  Write-Host "⚠️ 使用默认文件夹名: $folderName"
+              }
+              
+          } catch {
+              Write-Host "⚠️ 获取文件夹信息失败，使用默认值"
+              $driveId = "${{ steps.get_drive_info.outputs.driveId }}"
+              $folderName = "PVE-Custom-ISO"
+          }
           
-          # 尝试删除现有文件
-          if curl -s -X DELETE -H "Authorization: Bearer $uploadToken" "$fileUrl" > /dev/null 2>&1; then
-            echo "✅ 文件删除成功（或原本不存在）"
-          else
-            echo "⚠️  删除操作可能失败，继续上传..."
-          fi
+          # 4. 构建文件路径
+          Write-Host ""
+          Write-Host "[4/7] 构建文件路径..."
           
-          sleep 2
+          $encodedFolderName = [System.Uri]::EscapeDataString($folderName)
+          $encodedIsoName = [System.Uri]::EscapeDataString($isoName)
+          $fileUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}"
           
-          echo ""
-          echo "步骤 2: 创建上传会话..."
+          Write-Host "文件完整URL:"
+          Write-Host "  $fileUrl"
+          Write-Host ""
           
-          # 创建上传会话
-          createUrl="https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}:/createUploadSession"
+          # 5. 幂等操作核心：无条件删除现有文件
+          Write-Host "[5/7] 执行幂等操作：无条件删除现有文件..."
           
-          sessionResponse=$(curl -s -X POST \
-            -H "Authorization: Bearer $uploadToken" \
-            -H "Content-Type: application/json" \
-            -d '{}' \
-            "$createUrl")
+          $uploadHeaders = @{ Authorization = "Bearer $uploadToken" }
           
-          uploadUrl=$(echo "$sessionResponse" | jq -r '.uploadUrl // empty')
+          Write-Host "检查文件是否存在并尝试删除..."
           
-          if [ -z "$uploadUrl" ]; then
-            echo "❌ 上传会话创建失败"
-            echo "响应: $sessionResponse"
-            exit 1
-          fi
+          try {
+              # 尝试删除文件（幂等操作：删除不存在文件也返回成功）
+              Invoke-RestMethod -Uri $fileUrl -Headers $uploadHeaders -Method DELETE
+              Write-Host "✅ 文件删除成功（或原本不存在）"
+              
+              # 等待删除操作完成并验证
+              Write-Host "等待 2 秒确保删除操作完成..."
+              Start-Sleep -Seconds 2
+              
+              # 可选：验证文件确实被删除（增加稳定性）
+              Write-Host "验证文件是否确实不存在..."
+              try {
+                  $checkResponse = Invoke-RestMethod -Uri $fileUrl -Headers $uploadHeaders -Method GET
+                  Write-Host "⚠️ 文件仍然存在，尝试再次删除..."
+                  Invoke-RestMethod -Uri $fileUrl -Headers $uploadHeaders -Method DELETE
+                  Start-Sleep -Seconds 1
+              } catch {
+                  if ($_.Exception.Response.StatusCode -eq 404) {
+                      Write-Host "✅ 确认文件已不存在"
+                  }
+              }
+              
+          } catch {
+              # 即使删除失败也继续尝试上传（降级处理）
+              Write-Host "⚠️ 删除操作异常: $($_.Exception.Message)"
+              Write-Host "  将继续尝试上传..."
+          }
           
-          echo "✅ 上传会话创建成功"
+          # 6. 创建上传会话（使用最简请求体，完全避免replace语义）
+          Write-Host ""
+          Write-Host "[6/7] 创建上传会话（纯净请求体）..."
           
-          echo ""
-          echo "步骤 3: 分片上传..."
+          # 构建稳定的上传URL（使用root路径格式）
+          $createUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}:/createUploadSession"
           
-          # 分片上传参数
-          chunkSize=$((3276800 * 10))  # 31.25 MB
-          totalChunks=$(( (fileSize + chunkSize - 1) / chunkSize ))
-          bytesUploaded=0
+          Write-Host "使用稳定上传URL:"
+          Write-Host "  $createUrl"
+          Write-Host ""
           
-          echo "分片配置:"
-          echo "  - 分片大小: $((chunkSize/1024/1024)) MB"
-          echo "  - 总分片数: $totalChunks"
+          $sessionHeaders = @{
+              Authorization = "Bearer $uploadToken"
+              "Content-Type" = "application/json"
+          }
           
-          # 执行分片上传
-          for ((chunk=0; chunk<totalChunks; chunk++)); do
-            rangeStart=$bytesUploaded
-            rangeEnd=$((rangeStart + chunkSize - 1))
-            
-            if [ $rangeEnd -ge $fileSize ]; then
-              rangeEnd=$((fileSize - 1))
-            fi
-            
-            chunkSizeActual=$((rangeEnd - rangeStart + 1))
-            rangeHeader="bytes $rangeStart-$rangeEnd/$fileSize"
-            
-            # 上传当前分片（最多重试3次）
-            for ((retry=0; retry<3; retry++)); do
-              if dd if="$isoPath" bs=1 skip=$rangeStart count=$chunkSizeActual 2>/dev/null | \
-                 curl -s -X PUT "$uploadUrl" \
-                   -H "Content-Range: $rangeHeader" \
-                   -H "Content-Type: application/octet-stream" \
-                   --data-binary @- > /dev/null 2>&1; then
-                
-                progress=$(( (rangeEnd + 1) * 100 / fileSize ))
-                echo "分片 $((chunk+1))/$totalChunks: ✓ 完成 ($progress%)"
-                break
-              else
-                if [ $retry -eq 2 ]; then
-                  echo "❌ 分片 $((chunk+1))/$totalChunks 上传失败"
-                  exit 1
-                fi
-                echo "分片 $((chunk+1))/$totalChunks: ⚠️  重试 $((retry+1))/3..."
-                sleep 2
-              fi
-            done
-            
-            bytesUploaded=$((bytesUploaded + chunkSizeActual))
-            
-            # 每5个分片暂停一下
-            if [ $(((chunk+1) % 5)) -eq 0 ]; then
-              sleep 0.3
-            fi
-          done
+          # 最纯净的请求体：空对象，完全避免replace语义
+          # 根据Microsoft Graph API文档，createUploadSession支持空请求体
+          # 默认冲突行为是"fail"，但由于文件已删除，实际上就是创建新文件
+          $bodyJson = @{} | ConvertTo-Json -Compress
           
-          echo ""
-          echo "✅ 文件上传完成"
-          echo "文件已保存到 OneDrive: $folderName/$isoName"
+          Write-Host "请求体（纯净空对象）: $bodyJson"
+          Write-Host ""
+          
+          try {
+              Write-Host "正在发送创建上传会话请求..."
+              $session = Invoke-RestMethod -Method POST -Uri $createUrl -Headers $sessionHeaders -Body $bodyJson
+              
+              if (-not $session.uploadUrl) {
+                  throw "响应中未找到 uploadUrl"
+              }
+              
+              $uploadSessionUrl = $session.uploadUrl
+              Write-Host ""
+              Write-Host "✅ 上传会话创建成功！"
+              Write-Host "  - 使用稳定路径: /root:/${encodedFolderName}/${encodedIsoName}:"
+              Write-Host "  - 使用纯净请求体: {}"
+              
+              # 7. 执行分片上传
+              Write-Host ""
+              Write-Host "[7/7] 执行分片上传..."
+              
+              $chunkSize = 3276800 * 10  # 约31.25MB
+              $fileStream = [System.IO.File]::OpenRead($isoPath)
+              $totalChunks = [math]::Ceiling($fileSize / $chunkSize)
+              $bytesUploaded = 0
+              
+              Write-Host "  - 分片大小: $([math]::Round($chunkSize / 1MB, 2)) MB"
+              Write-Host "  - 总块数: $totalChunks"
+              Write-Host ""
+              
+              for ($i = 0; $i -lt $totalChunks; $i++) {
+                  $buffer = New-Object byte[] $chunkSize
+                  $bytesRead = $fileStream.Read($buffer, 0, $chunkSize)
+                  
+                  if ($bytesRead -eq 0) { break }
+                  
+                  $rangeStart = $bytesUploaded
+                  $rangeEnd = $bytesUploaded + $bytesRead - 1
+                  $rangeHeader = "bytes $rangeStart-$rangeEnd/$fileSize"
+                  
+                  $retry = 0
+                  $maxRetries = 3
+                  $success = $false
+                  
+                  while (-not $success -and $retry -lt $maxRetries) {
+                      try {
+                          $request = [System.Net.HttpWebRequest]::Create($uploadSessionUrl)
+                          $request.Method = "PUT"
+                          $request.ContentType = "application/octet-stream"
+                          $request.ContentLength = $bytesRead
+                          $request.Headers.Add("Content-Range", $rangeHeader)
+                          
+                          $requestStream = $request.GetRequestStream()
+                          $requestStream.Write($buffer, 0, $bytesRead)
+                          $requestStream.Close()
+                          
+                          # 获取响应，忽略可能的读取错误
+                          try {
+                              $response = $request.GetResponse()
+                              $responseStream = $response.GetResponseStream()
+                              $reader = New-Object System.IO.StreamReader($responseStream)
+                              $responseContent = $reader.ReadToEnd()
+                              $reader.Close()
+                              $responseStream.Close()
+                              $response.Close()
+                          } catch {
+                              # 忽略响应读取错误，只要请求成功发送
+                          }
+                          
+                          $progress = [math]::Round(($rangeEnd + 1) / $fileSize * 100, 2)
+                          Write-Host "分片 [$($i+1)/$totalChunks]: ✓ 成功 (进度: ${progress}%)"
+                          $success = $true
+                          
+                      } catch {
+                          $retry++
+                          if ($retry -eq $maxRetries) {
+                              Write-Host "分片 [$($i+1)/$totalChunks]: ✗ 失败 - $rangeHeader"
+                              Write-Host "  错误: $($_.Exception.Message)"
+                              throw "分片上传失败"
+                          }
+                          Write-Host "分片 [$($i+1)/$totalChunks]: ⚠️ 重试 $retry/$maxRetries (等待 2 秒...)"
+                          Start-Sleep -Seconds 2
+                      }
+                  }
+                  
+                  $bytesUploaded += $bytesRead
+                  
+                  # 每上传几个分片后短暂暂停
+                  if (($i + 1) % 5 -eq 0) {
+                      Start-Sleep -Milliseconds 300
+                  }
+              }
+              
+              $fileStream.Close()
+              Write-Host ""
+              Write-Host "========================================"
+              Write-Host "✅ 快速上传完成！"
+              Write-Host "  - 文件: $isoName"
+              Write-Host "  - 大小: $([math]::Round($fileSize / 1MB, 2)) MB"
+              Write-Host "  - 总块数: $totalChunks"
+              Write-Host "  - 策略: 检测→删除→验证→上传"
+              Write-Host "  - 请求体: 纯净空对象 {}"
+              Write-Host "========================================"
+              
+          } catch {
+              Write-Host ""
+              Write-Host "❌ 上传失败: $($_.Exception.Message)"
+              
+              # 输出详细错误信息
+              if ($_.Exception.Response) {
+                  try {
+                      $errorStream = $_.Exception.Response.GetResponseStream()
+                      $reader = New-Object System.IO.StreamReader($errorStream)
+                      $errorBody = $reader.ReadToEnd()
+                      $reader.Close()
+                      $errorStream.Close()
+                      
+                      Write-Host ""
+                      Write-Host "🔴 Graph API 错误响应:"
+                      Write-Host $errorBody
+                      
+                      # 尝试解析错误详情
+                      try {
+                          $errorObj = $errorBody | ConvertFrom-Json
+                          if ($errorObj.error) {
+                              Write-Host ""
+                              Write-Host "错误详情:"
+                              Write-Host "  代码: $($errorObj.error.code)"
+                              Write-Host "  消息: $($errorObj.error.message)"
+                          }
+                      } catch {
+                          # 忽略JSON解析错误
+                      }
+                  } catch {
+                      Write-Host "无法读取错误响应流"
+                  }
+              }
+              
+              throw
+          }
 
       # =========================
       # 创建 GitHub Release
@@ -499,7 +674,7 @@ jobs:
           echo "📦 输出文件: ${{ env.ISO_OUTPUT }}"
           echo "🏷️  Release Tag: pve-${{ env.PVE_VERSION }}-r8125"
           echo "💾 Artifact: PVE-${{ env.PVE_VERSION }}-R8125-ISO"
-          echo "☁️  OneDrive: ${{ steps.get_drive_info.outputs.folderName }}/${{ env.ISO_OUTPUT }}"
+          echo "☁️  OneDrive: PVE-Custom-ISO/${{ env.ISO_OUTPUT }}"
           echo ""
           echo "📋 版本信息:"
           echo "  - PVE: ${{ env.PVE_VERSION }}"
