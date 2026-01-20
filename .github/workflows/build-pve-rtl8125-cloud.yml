@@ -3,14 +3,6 @@ name: Build PVE ISO with RTL8125 (Cloud Only)
 on:
   workflow_dispatch:
     inputs:
-      force_rebuild:
-        description: '强制重新构建（即使版本相同）'
-        required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
       proxmox_iso_filename:
         description: 'Proxmox ISO 文件名（在 OneDrive 中）'
         required: true
@@ -186,7 +178,7 @@ jobs:
         # 设置环境变量
         "TEMP_DIR=$TEMP_DIR" >> $env:GITHUB_ENV
 
-    # 步骤三：构建自定义 PVE ISO（简化版，避免复杂的heredoc）
+    # 步骤三：构建自定义 PVE ISO
     - name: Build Custom PVE ISO
       shell: pwsh
       run: |
@@ -207,8 +199,8 @@ jobs:
         Write-Host "驱动文件: $driverFile"
         Write-Host "临时目录: $tempDir"
         
-        # 在 WSL 中执行构建（使用简化的脚本）
-        $wslScript = @'
+        # 在 WSL 中执行构建
+        $wslScript = @"
 #!/bin/bash
 set -e
 
@@ -216,89 +208,89 @@ echo "=== 开始构建 PVE ISO ==="
 
 # 设置工作目录
 WORK_DIR="/tmp/pve-build"
-ISO_ORIG="/mnt/c/Users/runneradmin/AppData/Local/Temp/pve-files/' + $isoFile + '"
-DRIVER_FILE="/mnt/c/Users/runneradmin/AppData/Local/Temp/pve-files/' + $driverFile + '"
+ISO_ORIG="/mnt/c/Users/runneradmin/AppData/Local/Temp/pve-files/$isoFile"
+DRIVER_FILE="/mnt/c/Users/runneradmin/AppData/Local/Temp/pve-files/$driverFile"
 
 # 清理工作目录
-rm -rf $WORK_DIR
-mkdir -p $WORK_DIR/iso
+rm -rf \$WORK_DIR
+mkdir -p \$WORK_DIR/iso
 
 echo "1. 解包原始 ISO..."
-xorriso -osirrox on -indev "$ISO_ORIG" -extract / $WORK_DIR/iso
-chmod -R +w $WORK_DIR/iso
+xorriso -osirrox on -indev "\$ISO_ORIG" -extract / \$WORK_DIR/iso
+chmod -R +w \$WORK_DIR/iso
 
 echo "2. 添加 RTL8125 驱动..."
-mkdir -p $WORK_DIR/iso/pool/extras
-cp "$DRIVER_FILE" $WORK_DIR/iso/pool/extras/
+mkdir -p \$WORK_DIR/iso/pool/extras
+cp "\$DRIVER_FILE" \$WORK_DIR/iso/pool/extras/
 
 echo "3. 解析版本信息..."
-ISO_BASENAME=$(basename "$ISO_ORIG")
-if [[ "$ISO_BASENAME" =~ proxmox-ve_([0-9]+\.[0-9]+(-[0-9]+)?)\.iso$ ]]; then
-    PVE_VERSION="${BASH_REMATCH[1]}"
-    ISO_OUTPUT="PVE-${PVE_VERSION}-r8125.iso"
-    ISO_LABEL="PVE-${PVE_VERSION}-R8125"
-    ISO_LABEL=$(echo "$ISO_LABEL" | tr -cd '[:alnum:]_-' | cut -c1-32)
+ISO_BASENAME=\$(basename "\$ISO_ORIG")
+if [[ "\$ISO_BASENAME" =~ proxmox-ve_([0-9]+\.[0-9]+(-[0-9]+)?)\.iso\$ ]]; then
+    PVE_VERSION="\${BASH_REMATCH[1]}"
+    ISO_OUTPUT="PVE-\${PVE_VERSION}-r8125.iso"
+    ISO_LABEL="PVE-\${PVE_VERSION}-R8125"
+    ISO_LABEL=\$(echo "\$ISO_LABEL" | tr -cd '[:alnum:]_-' | cut -c1-32)
     
-    echo "PVE 版本: $PVE_VERSION"
-    echo "输出文件: $ISO_OUTPUT"
-    echo "卷标: $ISO_LABEL"
+    echo "PVE 版本: \$PVE_VERSION"
+    echo "输出文件: \$ISO_OUTPUT"
+    echo "卷标: \$ISO_LABEL"
 else
-    echo "❌ 无法解析 ISO 文件名: $ISO_BASENAME"
+    echo "❌ 无法解析 ISO 文件名: \$ISO_BASENAME"
     exit 1
 fi
 
 echo "4. 配置自动安装..."
-PRESEED_FILE="$WORK_DIR/iso/preseed.cfg"
-if [ ! -f "$PRESEED_FILE" ]; then
-    touch "$PRESEED_FILE"
+PRESEED_FILE="\$WORK_DIR/iso/preseed.cfg"
+if [ ! -f "\$PRESEED_FILE" ]; then
+    touch "\$PRESEED_FILE"
 fi
 
-# 添加 late_command（使用echo避免heredoc）
-if ! grep -q "r8125" "$PRESEED_FILE" 2>/dev/null; then
-    echo '# 自动安装 RTL8125 驱动' >> "$PRESEED_FILE"
-    echo 'd-i preseed/late_command string \' >> "$PRESEED_FILE"
-    echo '  in-target sh -c "dpkg -i /cdrom/pool/extras/*.deb || true; \' >> "$PRESEED_FILE"
-    echo '  depmod -a; \' >> "$PRESEED_FILE"
-    echo '  modprobe r8125 || true"' >> "$PRESEED_FILE"
+# 添加 late_command
+if ! grep -q "r8125" "\$PRESEED_FILE" 2>/dev/null; then
+    echo '# 自动安装 RTL8125 驱动' >> "\$PRESEED_FILE"
+    echo 'd-i preseed/late_command string \' >> "\$PRESEED_FILE"
+    echo '  in-target sh -c "dpkg -i /cdrom/pool/extras/*.deb || true; \' >> "\$PRESEED_FILE"
+    echo '  depmod -a; \' >> "\$PRESEED_FILE"
+    echo '  modprobe r8125 || true"' >> "\$PRESEED_FILE"
     echo "✅ 自动安装配置已添加"
 fi
 
 echo "5. 重新打包 ISO..."
 xorriso -as mkisofs \
-  -r -V "$ISO_LABEL" \
-  -o "$WORK_DIR/$ISO_OUTPUT" \
+  -r -V "\$ISO_LABEL" \
+  -o "\$WORK_DIR/\$ISO_OUTPUT" \
   -J -joliet-long \
-  $WORK_DIR/iso
+  \$WORK_DIR/iso
 
 echo "6. 验证生成的 ISO..."
-if [ -f "$WORK_DIR/$ISO_OUTPUT" ]; then
-    ISO_SIZE=$(stat -c%s "$WORK_DIR/$ISO_OUTPUT")
+if [ -f "\$WORK_DIR/\$ISO_OUTPUT" ]; then
+    ISO_SIZE=\$(stat -c%s "\$WORK_DIR/\$ISO_OUTPUT")
     echo "✅ ISO 构建完成"
-    echo "  文件: $ISO_OUTPUT"
-    echo "  大小: $((ISO_SIZE/1024/1024)) MB"
+    echo "  文件: \$ISO_OUTPUT"
+    echo "  大小: \$((ISO_SIZE/1024/1024)) MB"
     
     # 计算 SHA256
-    sha256sum "$WORK_DIR/$ISO_OUTPUT" | cut -d' ' -f1 > "$WORK_DIR/sha256.txt"
-    SHA256=$(cat "$WORK_DIR/sha256.txt")
+    sha256sum "\$WORK_DIR/\$ISO_OUTPUT" | cut -d' ' -f1 > "\$WORK_DIR/sha256.txt"
+    SHA256=\$(cat "\$WORK_DIR/sha256.txt")
     
     # 复制回 Windows
-    cp "$WORK_DIR/$ISO_OUTPUT" "/mnt/c/Users/runneradmin/AppData/Local/Temp/"
-    cp "$WORK_DIR/sha256.txt" "/mnt/c/Users/runneradmin/AppData/Local/Temp/"
+    cp "\$WORK_DIR/\$ISO_OUTPUT" "/mnt/c/Users/runneradmin/AppData/Local/Temp/"
+    cp "\$WORK_DIR/sha256.txt" "/mnt/c/Users/runneradmin/AppData/Local/Temp/"
     
     # 输出环境变量
-    echo "PVE_VERSION=$PVE_VERSION"
-    echo "ISO_OUTPUT=$ISO_OUTPUT"
-    echo "SHA256=$SHA256"
-    echo "ISO_SIZE=$ISO_SIZE"
+    echo "PVE_VERSION=\$PVE_VERSION"
+    echo "ISO_OUTPUT=\$ISO_OUTPUT"
+    echo "SHA256=\$SHA256"
+    echo "ISO_SIZE=\$ISO_SIZE"
 else
     echo "❌ ISO 打包失败"
     exit 1
 fi
-'@
+"@
         
         # 保存脚本到临时文件并执行
         $scriptPath = Join-Path $env:TEMP "build-pve.sh"
-        $wslScript | Out-File -FilePath $scriptPath -Encoding UTF8 -NoNewline
+        $wslScript | Out-File -FilePath $scriptPath -Encoding UTF8
         
         Write-Host "在 WSL 中执行构建脚本..."
         $result = wsl bash $scriptPath
@@ -693,29 +685,31 @@ fi
       run: |
         Write-Host "=== 创建 GitHub Release ==="
         
-        # 检查是否需要重建
-        $forceRebuild = "${{ github.event.inputs.force_rebuild }}"
+        # 检查是否已有相同版本的Release
+        Write-Host "检查现有 Release..."
+        $tagName = "pve-$env:PVE_VERSION-r8125"
         
-        if ($forceRebuild -eq "false") {
-            Write-Host "检查现有 Release..."
-            $tagName = "pve-$env:PVE_VERSION-r8125"
+        $releaseUrl = "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tagName"
+        $headers = @{
+            "Authorization" = "token ${{ github.token }}"
+            "Accept" = "application/vnd.github.v3+json"
+        }
+        
+        try {
+            $releaseInfo = Invoke-RestMethod -Uri $releaseUrl -Headers $headers -Method GET
+            Write-Host "✅ Release 已存在: $tagName"
+            Write-Host "删除现有Release以便重新创建..."
             
-            $releaseUrl = "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tagName"
-            $headers = @{
-                "Authorization" = "token ${{ github.token }}"
-                "Accept" = "application/vnd.github.v3+json"
-            }
+            # 删除现有Release
+            $deleteUrl = "https://api.github.com/repos/${{ github.repository }}/releases/$($releaseInfo.id)"
+            Invoke-RestMethod -Uri $deleteUrl -Headers $headers -Method DELETE
+            Write-Host "✅ 现有Release已删除"
             
-            try {
-                $releaseInfo = Invoke-RestMethod -Uri $releaseUrl -Headers $headers -Method GET
-                Write-Host "✅ Release 已存在: $tagName"
-                Write-Host "跳过创建 Release"
-                return
-            } catch {
-                Write-Host "Release 不存在，继续创建..."
-            }
-        } else {
-            Write-Host "强制重建模式，创建新 Release..."
+            # 等待一下确保删除完成
+            Start-Sleep -Seconds 2
+            
+        } catch {
+            Write-Host "Release 不存在，将创建新Release..."
         }
         
         # 从驱动文件名提取版本
@@ -734,7 +728,7 @@ fi
         
         $createReleaseUrl = "https://api.github.com/repos/${{ github.repository }}/releases"
         $releaseData = @{
-            tag_name = "pve-$env:PVE_VERSION-r8125"
+            tag_name = $tagName
             name = "PVE $env:PVE_VERSION with RTL8125"
             body = $releaseBody
             draft = $false
