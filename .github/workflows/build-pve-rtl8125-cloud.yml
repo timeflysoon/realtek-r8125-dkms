@@ -59,16 +59,15 @@ jobs:
           
           # 获取访问令牌
           tokenUrl="https://login.microsoftonline.com/$OD_TENANT_ID/oauth2/v2.0/token"
-          body=$(cat <<EOF
-client_id=$OD_CLIENT_ID&
-scope=https://graph.microsoft.com/.default&
-client_secret=$OD_CLIENT_SECRET&
-grant_type=client_credentials
-EOF
-          )
+          
+          # 构建请求体（不使用 heredoc）
+          body_content="client_id=$OD_CLIENT_ID"
+          body_content="$body_content&scope=https://graph.microsoft.com/.default"
+          body_content="$body_content&client_secret=$OD_CLIENT_SECRET"
+          body_content="$body_content&grant_type=client_credentials"
           
           echo "正在获取访问令牌..."
-          tokenResponse=$(curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "$body" "$tokenUrl")
+          tokenResponse=$(curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "$body_content" "$tokenUrl")
           token=$(echo "$tokenResponse" | jq -r '.access_token // empty' | tr -d '\n\r')
           
           if [ -z "$token" ]; then
@@ -112,16 +111,15 @@ EOF
           
           # 获取新的访问令牌
           tokenUrl="https://login.microsoftonline.com/$OD_TENANT_ID/oauth2/v2.0/token"
-          body=$(cat <<EOF
-client_id=$OD_CLIENT_ID&
-scope=https://graph.microsoft.com/.default&
-client_secret=$OD_CLIENT_SECRET&
-grant_type=client_credentials
-EOF
-          )
+          
+          # 构建请求体
+          body_content="client_id=$OD_CLIENT_ID"
+          body_content="$body_content&scope=https://graph.microsoft.com/.default"
+          body_content="$body_content&client_secret=$OD_CLIENT_SECRET"
+          body_content="$body_content&grant_type=client_credentials"
           
           echo "正在获取下载令牌..."
-          tokenResponse=$(curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "$body" "$tokenUrl")
+          tokenResponse=$(curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "$body_content" "$tokenUrl")
           token=$(echo "$tokenResponse" | jq -r '.access_token // empty' | tr -d '\n\r')
           
           if [ -z "$token" ]; then
@@ -286,13 +284,13 @@ EOF
           
           # 添加 late_command
           if ! grep -q "r8125" "$PRESEED_FILE" 2>/dev/null; then
-            cat >> "$PRESEED_FILE" << 'EOF'
+            cat >> "$PRESEED_FILE" << 'PRESEED_EOF'
 # 自动安装 RTL8125 驱动
 d-i preseed/late_command string \
   in-target sh -c "dpkg -i /cdrom/pool/extras/*.deb || true; \
   depmod -a; \
   modprobe r8125 || true"
-EOF
+PRESEED_EOF
             echo "✅ 自动安装配置已添加"
           fi
           
@@ -330,16 +328,15 @@ EOF
           
           # 获取上传令牌
           tokenUrl="https://login.microsoftonline.com/$OD_TENANT_ID/oauth2/v2.0/token"
-          body=$(cat <<EOF
-client_id=$OD_CLIENT_ID&
-scope=https://graph.microsoft.com/.default&
-client_secret=$OD_CLIENT_SECRET&
-grant_type=client_credentials
-EOF
-          )
+          
+          # 构建请求体
+          body_content="client_id=$OD_CLIENT_ID"
+          body_content="$body_content&scope=https://graph.microsoft.com/.default"
+          body_content="$body_content&client_secret=$OD_CLIENT_SECRET"
+          body_content="$body_content&grant_type=client_credentials"
           
           echo "获取上传令牌..."
-          tokenResponse=$(curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "$body" "$tokenUrl")
+          tokenResponse=$(curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "$body_content" "$tokenUrl")
           uploadToken=$(echo "$tokenResponse" | jq -r '.access_token // empty' | tr -d '\n\r')
           
           if [ -z "$uploadToken" ]; then
