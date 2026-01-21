@@ -1,4 +1,4 @@
-name: Auto Update Gist with Airport Subscription
+name: Update Gist Subscription
 
 on:
   schedule:
