@@ -72,7 +72,7 @@ jobs:
 
           # ===== 默认订阅源列表（可在此处增删） =====
           default_sub_urls = [
-              "http://dbsub2.whtjdasha.com/s/b6ea7e4e77c3037cc6ffd6de407c04d6",
+              "https://dbsub2.whtjdasha.com/s/b6ea7e4e77c3037cc6ffd6de407c04d6",
               "https://raw.githubusercontent.com/freefq/free/master/v2",
               "https://getafreenode.com/subscribe.php?subtype=1",
           ]
