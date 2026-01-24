@@ -37,7 +37,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xorriso curl file jq
+          # 添加 isolinux 包以获取 isohdpfx.bin
+          sudo apt-get install -y xorriso curl file jq isolinux
       # =========================
       # 解析 ISO URL 以获取文件名（用于缓存和下载）
       # =========================
@@ -90,36 +91,34 @@ jobs:
       # =========================
       - name: Parse configuration and setup variables
         run: |
-          # 版本检查（作为警告）
-          echo "检查 ISO 版本..."
-          if [[ ! "${{ inputs.proxmox_iso_url }}" =~ proxmox-ve_[0-9]+\.[0-9]+(-[0-9]+)?\.iso$ ]]; then
-            echo "⚠️ ISO URL 格式可能不正确"
-            echo "预期格式: https://.../proxmox-ve_X.Y-Z.iso 或 proxmox-ve_X.Y.iso"
-          fi
-         
-          # 解析 PVE ISO 文件名并提取版本号
+          echo "ISO_ORIG=$ISO_ORIG"
+          
+          # 1. 解析 PVE 版本 (用于文件名)
           if [[ "$ISO_ORIG" =~ proxmox-ve_([0-9]+\.[0-9]+(-[0-9]+)?)\.iso$ ]]; then
             PVE_VERSION="${BASH_REMATCH[1]}"
             echo "PVE_VERSION=$PVE_VERSION" >> $GITHUB_ENV
             echo "ISO_OUTPUT=PVE-${PVE_VERSION}-r8125.iso" >> $GITHUB_ENV
-           
-            # 生成卷标并改进处理
-            ISO_LABEL="PVE-${PVE_VERSION}-R8125"
-            # 移除无效字符并确保长度
-            ISO_LABEL=$(echo "$ISO_LABEL" | tr -cd '[:alnum:]_-' | cut -c1-32)
-            echo "ISO_LABEL=$ISO_LABEL" >> $GITHUB_ENV
-           
-            echo ">>> 解析结果："
-            echo "PVE 版本: $PVE_VERSION"
-            echo "输出 ISO: $ISO_OUTPUT"
-            echo "卷标: $ISO_LABEL"
           else
             echo "❌ 无法从 ISO 文件名提取版本号: $ISO_ORIG"
             echo "预期格式: proxmox-ve_X.Y-Z.iso"
             exit 1
           fi
-         
-          # 解析 RTL8125 驱动 URL
+
+          # 2. 【完美修正】使用 blkid 提取原版 ISO 卷标
+          # blkid 能直接输出干净的 Label，无需正则清洗
+          echo ">>> 提取原版 ISO 卷标..."
+          ORIG_LABEL=$(blkid -o value -s LABEL "$ISO_ORIG")
+          
+          if [ -z "$ORIG_LABEL" ]; then
+             echo "⚠️ 无法提取卷标，使用文件名推断"
+             # 兜底：PVE 官方格式通常是 PVE_x.x
+             ORIG_LABEL="PVE_${PVE_VERSION%.*}"
+          fi
+          
+          echo "✅ 沿用原版卷标: $ORIG_LABEL"
+          echo "ISO_LABEL=$ORIG_LABEL" >> $GITHUB_ENV
+          
+          # 3. 解析 RTL8125 驱动 URL
           DRIVER_URL="${{ inputs.r8125_driver_url }}"
          
           # 提取仓库、标签、文件名等信息
@@ -153,14 +152,6 @@ jobs:
             echo "❌ 无法解析驱动URL: $DRIVER_URL"
             echo "URL 格式应为: https://github.com/owner/repo/releases/download/tag/filename"
             exit 1
-          fi
-         
-          # 检查驱动兼容性
-          echo "检查驱动兼容性..."
-          if [[ "$DRIVER_DISPLAY_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "✅ 驱动版本格式正确: $DRIVER_DISPLAY_VERSION"
-          else
-            echo "⚠️ 驱动版本格式异常: $DRIVER_DISPLAY_VERSION"
           fi
       # =========================
       # 检查是否需要重建
@@ -247,7 +238,7 @@ jobs:
             exit 1
           fi
       # =========================
-      # 构建自定义 ISO
+      # 构建自定义 ISO（使用 Gemini Pro 的引导修复参数）
       # =========================
       - name: Build custom PVE ISO
         if: ${{ steps.check-rebuild.outputs.skip_build != 'true' }}
@@ -273,12 +264,40 @@ jobs:
           else
             echo "⚠️ 自动安装配置已存在（跳过）"
           fi
-          echo ">>> ④ 重新打包 ISO"
+          
+          echo ">>> ④ 寻找引导文件 (isohdpfx.bin)"
+          # 动态查找 isohdpfx.bin
+          MBR_BIN=$(find /usr -name isohdpfx.bin | head -n 1)
+          if [ -z "$MBR_BIN" ]; then
+            echo "❌ 找不到 isohdpfx.bin，请检查是否安装了 isolinux"
+            exit 1
+          fi
+          echo "✅ 找到引导文件: $MBR_BIN"
+          
+          echo ">>> ⑤ 检查 ISO 引导文件"
+          if [ ! -f "work/iso/boot/isolinux/isolinux.bin" ]; then
+            echo "❌ 找不到 isolinux.bin"
+            exit 1
+          fi
+          if [ ! -f "work/iso/boot/grub/efi.img" ]; then
+            echo "❌ 找不到 efi.img"
+            exit 1
+          fi
+          
+          echo ">>> ⑥ 重新打包 ISO（使用混合引导参数）"
           xorriso -as mkisofs \
             -r -V "$ISO_LABEL" \
             -o "$ISO_OUTPUT" \
-            -J -joliet-long \
+            -J -joliet-long -cache-inodes \
+            -isohybrid-mbr "$MBR_BIN" \
+            -b boot/isolinux/isolinux.bin \
+            -c boot/isolinux/boot.cat \
+            -boot-load-size 4 -boot-info-table -no-emul-boot \
+            -eltorito-alt-boot \
+            -e boot/grub/efi.img \
+            -no-emul-boot -isohybrid-gpt-basdat \
             work/iso
+          
           echo ">>> ISO 构建完成"
           ls -lh "$ISO_OUTPUT"
           sha256sum "$ISO_OUTPUT" | tee sha256.txt
