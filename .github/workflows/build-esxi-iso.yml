@@ -20,20 +20,42 @@ jobs:
       with:
         token: ${{ secrets.AUTH_PAT }}
 
+    # 1. 关键步骤：使用 setup-python 确保指定版本被下载并解压到 hostedtoolcache
+    - name: Ensure Python 3.12.10 Exists
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12.10'
+        architecture: 'x64'
+        # Action 会自动把 Python 安装到 C:\hostedtoolcache\windows\Python\3.12.10\x64
+
+    # 2. 安装模块 (直接使用验证过的绝对硬路径)
     - name: Install Python Modules
       shell: pwsh
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-        $OutputEncoding = [System.Text.Encoding]::UTF8
         Write-Host "=== Install Python Modules ==="
+        
+        # 使用经过验证的绝对物理路径，避开 Runner 的 Shim 陷阱
         $pythonPath = "C:\hostedtoolcache\windows\Python\3.12.10\x64\python.exe"
-        Write-Host "Python Path: $pythonPath"
+        Write-Host "Using Verified Hardcoded Path: $pythonPath"
+        
+        # 双重检查：确保文件真的在那里
+        if (-not (Test-Path $pythonPath)) {
+            Write-Error "CRITICAL: The verified path does not exist! setup-python failed to populate cache?"
+            exit 1
+        }
+
         & $pythonPath --version
         & $pythonPath -m pip install --upgrade pip
+        # 安装 PowerCLI 依赖的特定库
         & $pythonPath -m pip install six lxml psutil pyopenssl
-        & $pythonPath -c "import six; import lxml; import psutil; import OpenSSL; print('All Python modules verified successfully')"
+        
+        # 验证模块加载（确保 DLL 路径正确）
+        & $pythonPath -c "import six; import lxml; import psutil; import OpenSSL; print('Python environment sanity check passed')"
+        
         "PYTHON_PATH=$pythonPath" >> $env:GITHUB_ENV
 
+    # 3. 安装 PowerCLI
     - name: Install VMware PowerCLI
       shell: pwsh
       run: |
@@ -43,26 +65,29 @@ jobs:
         Install-Module -Name VMware.PowerCLI -Scope CurrentUser -Force -AllowClobber
         Get-Module -ListAvailable VMware.PowerCLI | Select-Object Name, Version
 
+    # 4. 配置 PowerCLI (关键：传入绝对物理路径)
     - name: Configure PowerCLI
       shell: pwsh
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
         Write-Host "=== Configure PowerCLI ==="
+        
         $pythonPath = $env:PYTHON_PATH
-        if (-not $pythonPath) {
-            $pythonPath = "C:\hostedtoolcache\windows\Python\3.12.10\x64\python.exe"
-        }
+        Write-Host "Configuring PowerCLI to use physical executable: $pythonPath"
+        
+        # 这里必须是物理路径，ImageBuilder 才能找到同目录下的 DLL
         Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $false -PythonPath $pythonPath -Confirm:$false
         Get-PowerCLIConfiguration
 
-    - name: Test PowerCLI
+    # 5. 测试 ImageBuilder (验证一切是否正常)
+    - name: Test PowerCLI ImageBuilder
       shell: pwsh
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-        Write-Host "=== Test PowerCLI ==="
+        Write-Host "=== Test ImageBuilder Load ==="
+        # 如果路径不对或 DLL 加载失败，这里会直接报错中断
         Import-Module VMware.ImageBuilder -ErrorAction Stop
-        Write-Host "ImageBuilder imported successfully"
-        Get-PowerCLIConfiguration
+        Write-Host "✅ ImageBuilder loaded successfully!"
 
     # 步骤一：获取驱动信息（只用一次）
     - name: Get Drive and Folder Information
@@ -273,7 +298,16 @@ jobs:
         Write-Host "========================================"
         Write-Host ""
         
+        # 0. 防御性编程：在步骤一开始就确保isoPath变量存在（这是您建议的关键改进）
+        Write-Host "[0/7] 初始化ISO路径（防御性编程）..."
+        $isoPath = $env:ISO_PATH
+        if ([string]::IsNullOrEmpty($isoPath)) {
+            $isoPath = Join-Path (Join-Path $env:TEMP "depots") "ESXi-8.0U3b-24280767-RTL8125BG.iso"
+            Write-Host "使用默认ISO路径: $isoPath"
+        }
+        
         # 1. 获取全新的上传token（每次必须新token）
+        Write-Host ""
         Write-Host "[1/7] 获取全新的上传token..."
         $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
         $body = @{
@@ -300,10 +334,6 @@ jobs:
         # 2. 验证ISO文件
         Write-Host ""
         Write-Host "[2/7] 验证ISO文件..."
-        $isoPath = $env:ISO_PATH
-        if ([string]::IsNullOrEmpty($isoPath)) {
-            $isoPath = Join-Path (Join-Path $env:TEMP "depots") "ESXi-8.0U3b-24280767-RTL8125BG.iso"
-        }
         if (-not (Test-Path $isoPath)) { 
             throw "ISO 文件不存在: $isoPath" 
         }
