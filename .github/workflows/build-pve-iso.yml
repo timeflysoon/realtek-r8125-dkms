@@ -37,7 +37,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          # 添加 isolinux 包以获取 isohdpfx.bin
+          # 添加 isolinux 包以获取 isohdpfx.bin（为旧版 PVE 准备）
           sudo apt-get install -y xorriso curl file jq isolinux
       # =========================
       # 解析 ISO URL 以获取文件名（用于缓存和下载）
@@ -260,68 +260,87 @@ jobs:
             exit 1
           fi
       # =========================
-      # 构建自定义 ISO（智能路径修复版）
+      # 构建 ISO (智能适配 PVE 8.2+ 纯GRUB架构)
       # =========================
-      - name: Build custom PVE ISO
-        if: ${{ steps.check-rebuild.outputs.skip_build != 'true' }}
+      - name: Build Custom ISO
+        if: steps.check-rebuild.outputs.skip_build != 'true'
         run: |
-          rm -rf work
-          mkdir -p work/iso
+          rm -rf work && mkdir -p work/iso
           
-          echo ">>> ① 解包 ISO"
+          echo ">>> 1. 解包 ISO"
           xorriso -osirrox on -indev "$ISO_ORIG" -extract / work/iso
           chmod -R +w work/iso
 
-          echo ">>> ② 拷贝 RTL8125 驱动"
+          echo ">>> 2. 注入驱动"
           mkdir -p work/iso/pool/extras
           cp "$DRIVER_FILE" work/iso/pool/extras/
 
-          echo ">>> ③ 注入 preseed late-command"
+          echo ">>> 3. 配置 Preseed"
           PRESEED="work/iso/preseed.cfg"
           touch "$PRESEED"
           if ! grep -q "r8125" "$PRESEED"; then
-            echo '# 自动安装 r8125 驱动' >> "$PRESEED"
             echo 'd-i preseed/late_command string in-target sh -c "dpkg -i /cdrom/pool/extras/*.deb; depmod -a; modprobe r8125"' >> "$PRESEED"
-            echo "✅ 已添加安装配置"
           fi
+
+          echo ">>> 4. 智能判断引导模式 (关键修复)"
           
-          echo ">>> ④ 智能定位引导文件 (关键修复)"
-          # 1. 在宿主机找 MBR 模板 (isohdpfx.bin)
-          HOST_MBR=$(find /usr -name isohdpfx.bin | head -n 1)
-          if [ -z "$HOST_MBR" ]; then echo "❌ 宿主机缺少 isohdpfx.bin"; exit 1; fi
-          echo "宿主机 MBR 模板: $HOST_MBR"
-
-          # 2. 在解压目录找 ISO 内部的 isolinux.bin
-          # find 返回的是 work/iso/... 我们需要截取相对路径
-          FULL_ISOLINUX=$(find work/iso -name isolinux.bin | head -n 1)
-          if [ -z "$FULL_ISOLINUX" ]; then echo "❌ ISO内找不到 isolinux.bin"; exit 1; fi
-          # 获取相对路径 (例如 boot/isolinux/isolinux.bin)
-          REL_ISOLINUX=${FULL_ISOLINUX#work/iso/}
-          # 获取 boot.cat 的位置 (通常和 isolinux.bin 在一起)
-          REL_BOOT_CAT=$(dirname "$REL_ISOLINUX")/boot.cat
-          echo "ISO 引导文件路径: $REL_ISOLINUX"
-
-          # 3. 在解压目录找 ISO 内部的 efi.img
-          FULL_EFI=$(find work/iso -name efi.img | head -n 1)
-          if [ -z "$FULL_EFI" ]; then echo "❌ ISO内找不到 efi.img"; exit 1; fi
+          # 寻找 EFI 引导文件 (所有版本都有)
+          FULL_EFI=$(find work/iso -name efi.img | head -1)
+          if [ -z "$FULL_EFI" ]; then echo "❌ 找不到 efi.img"; exit 1; fi
           REL_EFI=${FULL_EFI#work/iso/}
-          echo "ISO EFI 镜像路径: $REL_EFI"
+          echo "EFI Image: $REL_EFI"
+
+          # 寻找 Legacy BIOS 引导文件 (Isolinux vs GRUB)
+          FULL_ISOLINUX=$(find work/iso -name isolinux.bin | head -1)
+          FULL_GRUB_BIOS=$(find work/iso -name eltorito.img | head -1)
           
-          echo ">>> ⑤ 重新打包 ISO"
-          # 注意：-b, -c, -e 后面跟的都是相对路径变量
+          XORRISO_ARGS=""
+
+          if [ -n "$FULL_ISOLINUX" ]; then
+            echo "✅ 检测到旧版架构 (Isolinux)"
+            REL_ISOLINUX=${FULL_ISOLINUX#work/iso/}
+            REL_BOOT_CAT=$(dirname "$REL_ISOLINUX")/boot.cat
+            
+            # 寻找宿主机 MBR 模板
+            HOST_MBR=$(find /usr -name isohdpfx.bin | head -1)
+            
+            XORRISO_ARGS="-isohybrid-mbr $HOST_MBR \
+              -b $REL_ISOLINUX \
+              -c $REL_BOOT_CAT \
+              -boot-load-size 4 -boot-info-table -no-emul-boot \
+              -eltorito-alt-boot \
+              -e $REL_EFI \
+              -no-emul-boot -isohybrid-gpt-basdat"
+              
+          elif [ -n "$FULL_GRUB_BIOS" ]; then
+            echo "✅ 检测到新版架构 (Pure GRUB, PVE 8.2+)"
+            
+            REL_GRUB_BIOS=${FULL_GRUB_BIOS#work/iso/}
+            
+            # 纯 GRUB 模式下，不需要宿主机的 isohdpfx.bin，也不需要 boot.cat
+            # 使用 --grub2-boot-info 参数
+            
+            XORRISO_ARGS="-b $REL_GRUB_BIOS \
+              -no-emul-boot -boot-load-size 4 -boot-info-table --grub2-boot-info \
+              -eltorito-alt-boot \
+              -e $REL_EFI \
+              -no-emul-boot -isohybrid-gpt-basdat"
+              
+          else
+            echo "❌ 致命错误：找不到 Isolinux 也就罢了，连 GRUB 的 eltorito.img 也没找到！"
+            echo ">>> 正在列出 /boot 目录结构供调试："
+            find work/iso/boot -maxdepth 4
+            exit 1
+          fi
+
+          echo ">>> 5. 打包 ISO"
           xorriso -as mkisofs \
             -r -V "$ISO_LABEL" \
             -o "$ISO_OUTPUT" \
             -J -joliet-long -cache-inodes \
-            -isohybrid-mbr "$HOST_MBR" \
-            -b "$REL_ISOLINUX" \
-            -c "$REL_BOOT_CAT" \
-            -boot-load-size 4 -boot-info-table -no-emul-boot \
-            -eltorito-alt-boot \
-            -e "$REL_EFI" \
-            -no-emul-boot -isohybrid-gpt-basdat \
+            $XORRISO_ARGS \
             work/iso
-          
+            
           echo ">>> ISO 构建完成"
           ls -lh "$ISO_OUTPUT"
           sha256sum "$ISO_OUTPUT" | tee sha256.txt
