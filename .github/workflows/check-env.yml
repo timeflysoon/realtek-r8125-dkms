@@ -22,6 +22,12 @@ jobs:
     timeout-minutes: 10
     
     steps:
+      - name: 可选：预置Python环境
+        shell: pwsh
+        run: |
+          Write-Host "此步骤仅为确保Python路径存在，不影响实际环境检查"
+          Write-Host "实际环境检查会识别预装Python和此步骤安装的Python"
+        
       - name: 检查环境并生成报告
         id: check-env
         shell: pwsh
@@ -54,7 +60,15 @@ jobs:
           foreach ($pattern in $pythonPaths) {
               $paths = Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue
               if ($paths) {
-                  $foundPython = $paths[0].FullName
+                  # 优化：按版本号降序排序，选择最新版本
+                  $sortedPaths = $paths | Sort-Object { 
+                      if ($_.FullName -match "\\Python\\(\d+\.\d+)\.(\d+)\\") {
+                          [version]"$($Matches[1]).$($Matches[2])"
+                      } else {
+                          [version]"0.0"
+                      }
+                  } -Descending
+                  $foundPython = $sortedPaths[0].FullName
                   break
               }
           }
@@ -247,8 +261,39 @@ jobs:
               $drives = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3"
               $systemDetails.磁盘分区数 = $drives.Count
               
+              # 新增：C盘剩余空间检查（对构建ISO至关重要）
+              try {
+                  $driveC = Get-PSDrive -Name C -ErrorAction Stop
+                  $freeSpaceGB = [math]::Round($driveC.Free / 1GB, 2)
+                  $totalSpaceGB = [math]::Round($driveC.Used / 1GB + $freeSpaceGB, 2)
+                  $systemDetails.C盘 = @{
+                      总量 = "$totalSpaceGB GB"
+                      剩余 = "$freeSpaceGB GB"
+                  }
+              } catch {
+                  $systemDetails.C盘 = @{
+                      总量 = "获取失败"
+                      剩余 = "获取失败"
+                  }
+              }
+              
               Write-Host "   $systemResult"
               Write-Host "   内存: 总量 $($systemDetails.内存.总量)，使用率 $($systemDetails.内存.使用率)，可用 $($systemDetails.内存.可用)"
+              
+              # 优化：增加C盘空间颜色预警
+              if ($systemDetails.C盘.剩余 -match "(\d+(\.\d+)?)") {
+                  $freeSpaceNum = [float]$Matches[1]
+                  $diskStatus = if ($freeSpaceNum -lt 10) { "⚠️ 空间紧张" } else { "✅ 充足" }
+                  
+                  if ($freeSpaceNum -lt 10) {
+                      Write-Host "   C盘: 总量 $($systemDetails.C盘.总量)，剩余 $($systemDetails.C盘.剩余) ($diskStatus)" -ForegroundColor Yellow
+                  } else {
+                      Write-Host "   C盘: 总量 $($systemDetails.C盘.总量)，剩余 $($systemDetails.C盘.剩余) ($diskStatus)"
+                  }
+              } else {
+                  Write-Host "   C盘: 总量 $($systemDetails.C盘.总量)，剩余 $($systemDetails.C盘.剩余)"
+              }
+              
               Write-Host "   磁盘分区数: $($systemDetails.磁盘分区数)"
               Write-Host "   操作系统: $($systemDetails.操作系统)"
               Write-Host "   架构: $($systemDetails.架构)"
@@ -314,6 +359,16 @@ jobs:
           
           $textReportLines += "6、系统资源 $systemResult"
           $textReportLines += "内存: 总量 $($systemDetails.内存.总量)，使用率 $($systemDetails.内存.使用率)，可用 $($systemDetails.内存.可用)"
+          
+          # 在文本报告中同样添加空间状态
+          if ($systemDetails.C盘.剩余 -match "(\d+(\.\d+)?)") {
+              $freeSpaceNum = [float]$Matches[1]
+              $diskStatus = if ($freeSpaceNum -lt 10) { "⚠️ 空间紧张" } else { "✅ 充足" }
+              $textReportLines += "C盘: 总量 $($systemDetails.C盘.总量)，剩余 $($systemDetails.C盘.剩余) ($diskStatus)"
+          } else {
+              $textReportLines += "C盘: 总量 $($systemDetails.C盘.总量)，剩余 $($systemDetails.C盘.剩余)"
+          }
+          
           $textReportLines += "磁盘分区数: $($systemDetails.磁盘分区数)"
           $textReportLines += "操作系统: $($systemDetails.操作系统)"
           $textReportLines += "架构: $($systemDetails.架构)"
@@ -335,6 +390,19 @@ jobs:
           echo "python_version=$($pythonResult.版本)" >> $env:GITHUB_OUTPUT
           echo "python_modules_installed=$installedCount" >> $env:GITHUB_OUTPUT
           echo "powercli_status=$powerCLIResult" >> $env:GITHUB_OUTPUT
+          echo "imagebuilder_status=$imageBuilderResult" >> $env:GITHUB_OUTPUT
+          echo "psget_status=$psGetResult" >> $env:GITHUB_OUTPUT
+          
+          # 输出磁盘状态
+          if ($systemDetails.C盘.剩余 -match "(\d+(\.\d+)?)") {
+              $freeSpaceNum = [float]$Matches[1]
+              echo "c_drive_free=$($systemDetails.C盘.剩余)" >> $env:GITHUB_OUTPUT
+              echo "c_drive_status=$(if ($freeSpaceNum -lt 10) { 'warning' } else { 'ok' })" >> $env:GITHUB_OUTPUT
+          } else {
+              echo "c_drive_free=unknown" >> $env:GITHUB_OUTPUT
+              echo "c_drive_status=unknown" >> $env:GITHUB_OUTPUT
+          }
+          
           echo "execution_time=$executionTime" >> $env:GITHUB_OUTPUT
           
           # 修改退出逻辑：只在Python未安装时失败，其他情况都成功
@@ -349,11 +417,66 @@ jobs:
       - name: 上传检查报告
         uses: actions/upload-artifact@v4
         with:
-          name: environment-check-reports  # 修改这里：制品名称改为英文
+          name: environment-check-reports
           path: |
             环境检查报告.json
             环境检查报告.txt
           retention-days: 30
+          
+      - name: 生成 GitHub 摘要
+        if: always()
+        shell: pwsh
+        run: |
+          # 准备状态图标
+          $pythonIcon = if ("${{ steps.check-env.outputs.python_status }}" -match "✅") { "✅" } elseif ("${{ steps.check-env.outputs.python_status }}" -match "⚠") { "⚠️" } else { "❌" }
+          $powercliIcon = if ("${{ steps.check-env.outputs.powercli_status }}" -match "✅") { "✅" } else { "❌" }
+          $imagebuilderIcon = if ("${{ steps.check-env.outputs.imagebuilder_status }}" -match "✅") { "✅" } else { "❌" }
+          $psgetIcon = if ("${{ steps.check-env.outputs.psget_status }}" -match "✅") { "✅" } else { "❌" }
+          $diskIcon = if ("${{ steps.check-env.outputs.c_drive_status }}" -eq "warning") { "⚠️" } elseif ("${{ steps.check-env.outputs.c_drive_status }}" -eq "ok") { "✅" } else { "❓" }
+          
+          # 准备详细信息
+          $pythonModulesInfo = "已安装 ${{ steps.check-env.outputs.python_modules_installed }}/4 个模块"
+          $diskInfo = if ("${{ steps.check-env.outputs.c_drive_free }}" -eq "unknown") { "状态未知" } else { "${{ steps.check-env.outputs.c_drive_free }}" }
+          
+          # 生成摘要Markdown
+          $summary = @"
+          ## 🚀 环境检查概览
+          
+          | 检查项 | 状态 | 详细信息 |
+          | :--- | :--- | :--- |
+          | **Python** | $pythonIcon | 版本: ${{ steps.check-env.outputs.python_version }}<br>$pythonModulesInfo |
+          | **VMware.PowerCLI** | $powercliIcon | VMware自动化模块 |
+          | **VMware.ImageBuilder** | $imagebuilderIcon | ESXi镜像构建模块 |
+          | **PowerShellGet** | $psgetIcon | PowerShell模块管理 |
+          | **C盘空间** | $diskIcon | $diskInfo |
+          | **检查耗时** | ⏱️ | ${{ steps.check-env.outputs.execution_time }} 秒 |
+          
+          ### 📊 检查结果
+          - **Python状态**: ${{ steps.check-env.outputs.python_status }}
+          - **Python模块**: 已安装 ${{ steps.check-env.outputs.python_modules_installed }}/4 个必需模块
+          - **VMware.PowerCLI**: ${{ steps.check-env.outputs.powercli_status }}
+          - **C盘剩余空间**: ${{ steps.check-env.outputs.c_drive_free }}
+          
+          > 💡 **提示**: 完整检查报告已保存为制品，可从右侧 Artifacts 区域下载查看详细信息。
+          
+          ### 📁 报告文件
+          - `环境检查报告.txt` - 文本格式，便于快速阅读
+          - `环境检查报告.json` - JSON格式，便于程序自动化处理
+          
+          ### 🎯 检查结论
+          $(if ("${{ steps.check-env.outputs.python_status }}" -match "❌") { 
+              "❌ **检查失败**: Python未安装，无法继续后续任务" 
+          } elseif ("${{ steps.check-env.outputs.c_drive_status }}" -eq "warning") {
+              "⚠️ **警告**: C盘空间紧张，建议清理后重试" 
+          } elseif ("${{ steps.check-env.outputs.python_modules_installed }}" -lt 4) {
+              "⚠️ **警告**: Python模块不全，部分功能可能受限" 
+          } else {
+              "✅ **检查通过**: 环境满足基本要求，可以继续后续任务" 
+          })
+          "@
+          
+          # 写入GitHub Step Summary - 使用更稳健的编码方式
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           
       - name: 显示最终状态
         if: always()
@@ -367,7 +490,16 @@ jobs:
           Write-Host "Python版本: ${{ steps.check-env.outputs.python_version }}"
           Write-Host "Python模块安装数: ${{ steps.check-env.outputs.python_modules_installed }}/4"
           Write-Host "VMware.PowerCLI: ${{ steps.check-env.outputs.powercli_status }}"
+          
+          # 显示磁盘状态，并根据状态使用颜色
+          if ("${{ steps.check-env.outputs.c_drive_status }}" -eq "warning") {
+              Write-Host "C盘剩余空间: ${{ steps.check-env.outputs.c_drive_free }} (⚠️ 空间紧张)" -ForegroundColor Yellow
+          } else {
+              Write-Host "C盘剩余空间: ${{ steps.check-env.outputs.c_drive_free }}"
+          }
+          
           Write-Host "检查耗时: ${{ steps.check-env.outputs.execution_time }} 秒"
           Write-Host ""
-          Write-Host "下载制品 'environment-check-reports' 获取完整报告"  # 修改这里
+          Write-Host "📋 摘要已生成，请在GitHub Action界面查看完整报告"
+          Write-Host "📁 详细报告已保存至制品 'environment-check-reports'"
           Write-Host "=" * 50
