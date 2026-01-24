@@ -388,6 +388,7 @@ jobs:
           # 输出变量
           echo "python_status=$($pythonResult.状态)" >> $env:GITHUB_OUTPUT
           echo "python_version=$($pythonResult.版本)" >> $env:GITHUB_OUTPUT
+          echo "python_path=$($pythonResult.路径)" >> $env:GITHUB_OUTPUT
           echo "python_modules_installed=$installedCount" >> $env:GITHUB_OUTPUT
           echo "powercli_status=$powerCLIResult" >> $env:GITHUB_OUTPUT
           echo "imagebuilder_status=$imageBuilderResult" >> $env:GITHUB_OUTPUT
@@ -435,7 +436,7 @@ jobs:
           $diskIcon = if ("${{ steps.check-env.outputs.c_drive_status }}" -eq "warning") { "⚠️" } elseif ("${{ steps.check-env.outputs.c_drive_status }}" -eq "ok") { "✅" } else { "❓" }
           
           # 准备详细信息
-          $pythonModulesInfo = "已安装 ${{ steps.check-env.outputs.python_modules_installed }}/4 个模块"
+          $pythonModulesInfo = "版本: ${{ steps.check-env.outputs.python_version }}<br>路径: ${{ steps.check-env.outputs.python_path }}<br>已安装 ${{ steps.check-env.outputs.python_modules_installed }}/4 个模块"
           $diskInfo = if ("${{ steps.check-env.outputs.c_drive_free }}" -eq "unknown") { "状态未知" } else { "${{ steps.check-env.outputs.c_drive_free }}" }
           
           # 生成摘要Markdown
@@ -444,7 +445,7 @@ jobs:
           
           | 检查项 | 状态 | 详细信息 |
           | :--- | :--- | :--- |
-          | **Python** | $pythonIcon | 版本: ${{ steps.check-env.outputs.python_version }}<br>$pythonModulesInfo |
+          | **Python** | $pythonIcon | $pythonModulesInfo |
           | **VMware.PowerCLI** | $powercliIcon | VMware自动化模块 |
           | **VMware.ImageBuilder** | $imagebuilderIcon | ESXi镜像构建模块 |
           | **PowerShellGet** | $psgetIcon | PowerShell模块管理 |
@@ -453,6 +454,7 @@ jobs:
           
           ### 📊 检查结果
           - **Python状态**: ${{ steps.check-env.outputs.python_status }}
+          - **Python路径**: ${{ steps.check-env.outputs.python_path }}
           - **Python模块**: 已安装 ${{ steps.check-env.outputs.python_modules_installed }}/4 个必需模块
           - **VMware.PowerCLI**: ${{ steps.check-env.outputs.powercli_status }}
           - **C盘剩余空间**: ${{ steps.check-env.outputs.c_drive_free }}
@@ -488,6 +490,7 @@ jobs:
           Write-Host "=" * 50
           Write-Host "Python状态: ${{ steps.check-env.outputs.python_status }}"
           Write-Host "Python版本: ${{ steps.check-env.outputs.python_version }}"
+          Write-Host "Python路径: ${{ steps.check-env.outputs.python_path }}"
           Write-Host "Python模块安装数: ${{ steps.check-env.outputs.python_modules_installed }}/4"
           Write-Host "VMware.PowerCLI: ${{ steps.check-env.outputs.powercli_status }}"
           
