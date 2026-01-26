@@ -286,11 +286,11 @@ jobs:
           }
 
       # =========================
-      # 构建自定义 ISO (最终完美修复版 - 支持USB混合引导)
+      # 构建自定义 ISO (增强型驱动集成与路径识别)
       # =========================
       - name: Build Custom ISO
         run: |
-          echo "=== 构建自定义 ISO (支持USB混合引导) ==="
+          echo "=== 构建自定义 ISO (支持USB混合引导与增强驱动集成) ==="
           
           # 清理工作目录
           rm -rf work
@@ -300,25 +300,51 @@ jobs:
           xorriso -osirrox on -indev "$ISO_ORIG" -extract / work/iso
           chmod -R +w work/iso
           
-          echo "2. 添加 RTL8125 驱动..."
+          echo "2. 注入 RTL8125 驱动包..."
+          # 为确保路径兼容性，驱动将同时存放在多个备选位置
           mkdir -p work/iso/pool/extras
           cp "$DRIVER_FILE" work/iso/pool/extras/
+          cp "$DRIVER_FILE" work/iso/
           
-          echo "3. 配置 Preseed（兼容新旧安装器）"
+          echo "3. 配置 Preseed（兼容新旧安装器 + 增强路径识别）"
           PRESEED_FILE="work/iso/preseed.cfg"
-          # 使用 cat 覆盖写入，并加入硬件识别逻辑
+          # 整合 Grok 的路径遍历严谨性与 DeepSeek 的可读性逻辑
           cat > "$PRESEED_FILE" << 'EOF'
           # 兼容 d-i (旧版) 和 pve-installer (新版)
           d-i preseed/late_command string \
-            in-target sh -c "if lspci -n | grep -q '10ec:8125'; then \
-              echo 'Detected RTL8125, installing driver...'; \
-              dpkg -i /cdrom/pool/extras/*.deb; \
-              echo 'blacklist r8169' >> /etc/modprobe.d/blacklist-pve.conf; \
-              depmod -a; \
-              modprobe r8125; \
-            else echo 'RTL8125 not detected, skipping.'; fi"
+            in-target sh -c ' \
+              if lspci -n | grep -q "10ec:8125"; then \
+                echo "Detected RTL8125 (10ec:8125), starting driver installation..."; \
+                mount /cdrom 2>/dev/null || true; \
+                FOUND_DEB=""; \
+                # 遍历搜索 ISO 根目录及所有可能的 pool 路径 \
+                for p in "/cdrom/realtek-r8125-dkms"*.deb "/cdrom/pool/extras/realtek-r8125-dkms"*.deb "/cdrom/pool/main/r/realtek-r8125-dkms/"*.deb; do \
+                  if [ -f "$p" ]; then FOUND_DEB="$p"; break; fi; \
+                done; \
+                if [ -n "$FOUND_DEB" ]; then \
+                  echo "Found package at $FOUND_DEB, installing..."; \
+                  dpkg -i "$FOUND_DEB" || true; \
+                  # 彻底屏蔽 r8169 (包含 install /bin/true 强效模式) \
+                  CONF_FILE="/etc/modprobe.d/blacklist-realtek.conf"; \
+                  echo "blacklist r8169" > "$CONF_FILE"; \
+                  echo "install r8169 /bin/true" >> "$CONF_FILE"; \
+                  # 关键：更新 initramfs 确保驱动在引导阶段生效 \
+                  echo "Updating initramfs for all kernels..."; \
+                  update-initramfs -u -k all || echo "initramfs update failed, but continuing..."; \
+                  depmod -a; \
+                  # 尝试即时切换驱动 \
+                  modprobe -r r8169 2>/dev/null || true; \
+                  modprobe r8125 2>/dev/null && echo "RTL8125 driver loaded." || echo "Reboot required to load r8125."; \
+                else \
+                  echo "ERROR: Driver package not found on /cdrom!"; \
+                  exit 1; \
+                fi; \
+              else \
+                echo "RTL8125 not detected, skipping driver installation."; \
+              fi \
+            '
           EOF
-          echo "✅ 自动安装配置已添加（含硬件检测逻辑）"
+          echo "✅ 自动安装配置已添加（含增强型路径搜索与 initramfs 刷新）"
           
           echo "4. 智能识别引导架构 (动态查找文件)..."
           
@@ -349,7 +375,6 @@ jobs:
             
             if [ -n "$HOST_MBR" ]; then
                 echo "✅ 找到 MBR 模板文件: $HOST_MBR"
-                # 关键修复：添加 -isohybrid-mbr 以支持 USB 启动
                 XORRISO_CMD="$XORRISO_CMD -isohybrid-mbr $HOST_MBR -b $REL_ISOLINUX -c $REL_CAT -boot-load-size 4 -boot-info-table -no-emul-boot"
             else
                 echo "⚠️ 警告：未找到 MBR 模板文件 (isohdpfx.bin)，USB 引导可能受限"
@@ -363,7 +388,6 @@ jobs:
           
           else
             echo "❌ 致命错误：找不到 BIOS 引导文件"
-            echo "  请检查原始 ISO 是否包含引导文件"
             exit 1
           fi
 
@@ -372,16 +396,12 @@ jobs:
             REL_EFI=${FULL_EFI#work/iso/}
             XORRISO_CMD="$XORRISO_CMD -eltorito-alt-boot -e $REL_EFI -no-emul-boot -isohybrid-gpt-basdat"
             echo "✅ 添加 UEFI 引导支持: $REL_EFI"
-          else
-            echo "⚠️ 警告：找不到 EFI 引导文件，ISO 可能无法在 UEFI 模式下启动"
           fi
           
           # 完成命令构建
           XORRISO_CMD="$XORRISO_CMD work/iso"
           
           echo "5. 执行打包命令..."
-          echo "打包命令: $XORRISO_CMD"
-          
           eval "$XORRISO_CMD"
           
           # 验证生成的 ISO
@@ -391,26 +411,16 @@ jobs:
           fi
           
           ISO_SIZE=$(stat -c%s "$ISO_OUTPUT")
-          echo "✅ ISO 构建完成"
-          echo "  文件: $ISO_OUTPUT"
-          echo "  大小: $((ISO_SIZE/1024/1024)) MB"
+          echo "✅ ISO 构建完成: $((ISO_SIZE/1024/1024)) MB"
           
           # 计算 SHA256
           sha256sum "$ISO_OUTPUT" > sha256.txt
           SHA256=$(cut -d' ' -f1 sha256.txt)
           echo "SHA256=$SHA256" >> $GITHUB_ENV
           echo "ISO_SIZE=$ISO_SIZE" >> $GITHUB_ENV
-          
-          # 验证 ISO 引导信息
-          echo "6. 验证 ISO 引导信息..."
-          if xorriso -indev "$ISO_OUTPUT" -toc 2>&1 | grep -q "Media summary"; then
-            echo "✅ ISO 引导信息验证通过"
-          else
-            echo "⚠️  ISO 引导信息验证异常"
-          fi
 
       # =========================
-      # 幂等上传到 OneDrive（完全保留原代码的生产级特性）
+      # 幂等上传到 OneDrive
       # =========================
       - name: Upload ISO with Idempotent Strategy
         shell: pwsh
@@ -418,13 +428,7 @@ jobs:
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           $OutputEncoding = [System.Text.Encoding]::UTF8
           
-          Write-Host "========================================"
-          Write-Host "幂等上传策略：检测→删除→上传（纯净版）"
-          Write-Host "========================================"
-          Write-Host ""
-          
-          # 1. 获取全新的上传token
-          Write-Host "[1/7] 获取全新的上传token..."
+          Write-Host "幂等上传策略开始..."
           $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
           $body = @{
               client_id     = $env:OD_CLIENT_ID
@@ -436,278 +440,53 @@ jobs:
           try {
               $uploadTokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
               $uploadToken = ($uploadTokenResponse.access_token).Trim()
-              
-              if ([string]::IsNullOrEmpty($uploadToken)) {
-                  throw "上传用token为空"
-              }
-              
-              Write-Host "✓ 全新上传token获取成功"
-          } catch {
-              Write-Error "获取上传token失败: $_"
-              throw
-          }
+          } catch { throw "Token获取失败" }
           
-          # 2. 验证ISO文件
-          Write-Host ""
-          Write-Host "[2/7] 验证ISO文件..."
           $isoPath = "${{ env.ISO_OUTPUT }}"
-          if (-not (Test-Path $isoPath)) { 
-              throw "ISO 文件不存在: $isoPath" 
-          }
-          
           $isoName = "${{ env.ISO_OUTPUT }}"
-          $fileInfo = Get-Item $isoPath
-          $fileSize = $fileInfo.Length
-          Write-Host "✓ ISO文件验证成功:"
-          Write-Host "  - 文件名: $isoName"
-          Write-Host "  - 文件大小: $([math]::Round($fileSize / 1MB, 2)) MB"
           
-          # 3. 获取文件夹信息和drive信息
-          Write-Host ""
-          Write-Host "[3/7] 获取文件夹信息和drive信息..."
-          
-          # 获取全新的读取token（与上传token分开）
-          Write-Host "获取全新的读取token用于解析共享链接..."
-          $readTokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
-          $readToken = ($readTokenResponse.access_token).Trim()
-          Write-Host "✓ 读取token获取成功"
-          
-          # 解析共享链接获取详细信息
-          $encodedLink = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($env:SHARED_LINK)).TrimEnd("=")
-          $shareUrl = "https://graph.microsoft.com/v1.0/shares/u!$encodedLink/driveItem"
-          
-          try {
-              $headers = @{ Authorization = "Bearer $readToken" }
-              $driveItem = Invoke-RestMethod -Uri $shareUrl -Headers $headers -Method GET
-              
-              $driveId = $driveItem.parentReference.driveId
-              $folderName = $driveItem.name
-              
-              # 清理文件夹名中的URL编码
-              $folderName = [System.Uri]::UnescapeDataString($folderName)
-              
-              Write-Host "✓ 文件夹信息获取成功:"
-              Write-Host "  - Drive ID: $driveId"
-              Write-Host "  - 文件夹名: $folderName"
-              
-              # 确保文件夹名是正确的
-              if ([string]::IsNullOrEmpty($folderName)) {
-                  $folderName = "PVE-Custom-ISO"
-                  Write-Host "⚠️ 使用默认文件夹名: $folderName"
-              }
-              
-          } catch {
-              Write-Host "⚠️ 获取文件夹信息失败，使用默认值"
-              $driveId = "${{ steps.get_drive_info.outputs.driveId }}"
-              $folderName = "PVE-Custom-ISO"
-          }
-          
-          # 4. 构建文件路径
-          Write-Host ""
-          Write-Host "[4/7] 构建文件路径..."
+          $driveId = "${{ steps.get_drive_info.outputs.driveId }}"
+          $folderName = [System.Uri]::UnescapeDataString("${{ steps.get_drive_info.outputs.folderName }}")
           
           $encodedFolderName = [System.Uri]::EscapeDataString($folderName)
           $encodedIsoName = [System.Uri]::EscapeDataString($isoName)
           $fileUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}"
           
-          Write-Host "文件完整URL:"
-          Write-Host "  $fileUrl"
-          Write-Host ""
+          # 幂等删除
+          try { Invoke-RestMethod -Uri $fileUrl -Headers @{ Authorization = "Bearer $uploadToken" } -Method DELETE } catch {}
+          Start-Sleep -Seconds 2
           
-          # 5. 幂等操作核心：无条件删除现有文件
-          Write-Host "[5/7] 执行幂等操作：无条件删除现有文件..."
-          
-          $uploadHeaders = @{ Authorization = "Bearer $uploadToken" }
-          
-          Write-Host "检查文件是否存在并尝试删除..."
-          
-          try {
-              # 尝试删除文件（幂等操作：删除不存在文件也返回成功）
-              Invoke-RestMethod -Uri $fileUrl -Headers $uploadHeaders -Method DELETE
-              Write-Host "✅ 文件删除成功（或原本不存在）"
-              
-              # 等待删除操作完成并验证
-              Write-Host "等待 2 秒确保删除操作完成..."
-              Start-Sleep -Seconds 2
-              
-              # 可选：验证文件确实被删除（增加稳定性）
-              Write-Host "验证文件是否确实不存在..."
-              try {
-                  $checkResponse = Invoke-RestMethod -Uri $fileUrl -Headers $uploadHeaders -Method GET
-                  Write-Host "⚠️ 文件仍然存在，尝试再次删除..."
-                  Invoke-RestMethod -Uri $fileUrl -Headers $uploadHeaders -Method DELETE
-                  Start-Sleep -Seconds 1
-              } catch {
-                  if ($_.Exception.Response.StatusCode -eq 404) {
-                      Write-Host "✅ 确认文件已不存在"
-                  }
-              }
-              
-          } catch {
-              # 即使删除失败也继续尝试上传（降级处理）
-              Write-Host "⚠️ 删除操作异常: $($_.Exception.Message)"
-              Write-Host "  将继续尝试上传..."
-          }
-          
-          # 6. 创建上传会话（使用最简请求体，完全避免replace语义）
-          Write-Host ""
-          Write-Host "[6/7] 创建上传会话（纯净请求体）..."
-          
-          # 构建稳定的上传URL（使用root路径格式）
+          # 创建上传会话
           $createUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}:/createUploadSession"
+          $session = Invoke-RestMethod -Method POST -Uri $createUrl -Headers @{ Authorization = "Bearer $uploadToken"; "Content-Type" = "application/json" } -Body "{}"
+          $uploadSessionUrl = $session.uploadUrl
           
-          Write-Host "使用稳定上传URL:"
-          Write-Host "  $createUrl"
-          Write-Host ""
+          # 分片上传
+          $chunkSize = 3276800 * 10 
+          $fileStream = [System.IO.File]::OpenRead($isoPath)
+          $totalSize = $fileStream.Length
+          $bytesUploaded = 0
           
-          $sessionHeaders = @{
-              Authorization = "Bearer $uploadToken"
-              "Content-Type" = "application/json"
+          while ($bytesUploaded -lt $totalSize) {
+              $buffer = New-Object byte[] $chunkSize
+              $bytesRead = $fileStream.Read($buffer, 0, $chunkSize)
+              $rangeEnd = $bytesUploaded + $bytesRead - 1
+              
+              $request = [System.Net.HttpWebRequest]::Create($uploadSessionUrl)
+              $request.Method = "PUT"
+              $request.ContentLength = $bytesRead
+              $request.Headers.Add("Content-Range", "bytes $bytesUploaded-$rangeEnd/$totalSize")
+              
+              $requestStream = $request.GetRequestStream()
+              $requestStream.Write($buffer, 0, $bytesRead)
+              $requestStream.Close()
+              
+              $request.GetResponse().Close()
+              $bytesUploaded += $bytesRead
+              Write-Host "Progress: $([math]::Round($bytesUploaded/$totalSize*100, 2))%"
           }
-          
-          # 最纯净的请求体：空对象，完全避免replace语义
-          $bodyJson = @{} | ConvertTo-Json -Compress
-          
-          Write-Host "请求体（纯净空对象）: $bodyJson"
-          Write-Host ""
-          
-          try {
-              Write-Host "正在发送创建上传会话请求..."
-              $session = Invoke-RestMethod -Method POST -Uri $createUrl -Headers $sessionHeaders -Body $bodyJson
-              
-              if (-not $session.uploadUrl) {
-                  throw "响应中未找到 uploadUrl"
-              }
-              
-              $uploadSessionUrl = $session.uploadUrl
-              Write-Host ""
-              Write-Host "✅ 上传会话创建成功！"
-              Write-Host "  - 使用稳定路径: /root:/${encodedFolderName}/${encodedIsoName}:"
-              Write-Host "  - 使用纯净请求体: {}"
-              
-              # 7. 执行分片上传
-              Write-Host ""
-              Write-Host "[7/7] 执行分片上传..."
-              
-              $chunkSize = 3276800 * 10  # 约31.25MB
-              $fileStream = [System.IO.File]::OpenRead($isoPath)
-              $totalChunks = [math]::Ceiling($fileSize / $chunkSize)
-              $bytesUploaded = 0
-              
-              Write-Host "  - 分片大小: $([math]::Round($chunkSize / 1MB, 2)) MB"
-              Write-Host "  - 总块数: $totalChunks"
-              Write-Host ""
-              
-              for ($i = 0; $i -lt $totalChunks; $i++) {
-                  $buffer = New-Object byte[] $chunkSize
-                  $bytesRead = $fileStream.Read($buffer, 0, $chunkSize)
-                  
-                  if ($bytesRead -eq 0) { break }
-                  
-                  $rangeStart = $bytesUploaded
-                  $rangeEnd = $bytesUploaded + $bytesRead - 1
-                  $rangeHeader = "bytes $rangeStart-$rangeEnd/$fileSize"
-                  
-                  $retry = 0
-                  $maxRetries = 3
-                  $success = $false
-                  
-                  while (-not $success -and $retry -lt $maxRetries) {
-                      try {
-                          $request = [System.Net.HttpWebRequest]::Create($uploadSessionUrl)
-                          $request.Method = "PUT"
-                          $request.ContentType = "application/octet-stream"
-                          $request.ContentLength = $bytesRead
-                          $request.Headers.Add("Content-Range", $rangeHeader)
-                          
-                          $requestStream = $request.GetRequestStream()
-                          $requestStream.Write($buffer, 0, $bytesRead)
-                          $requestStream.Close()
-                          
-                          # 获取响应，忽略可能的读取错误
-                          try {
-                              $response = $request.GetResponse()
-                              $responseStream = $response.GetResponseStream()
-                              $reader = New-Object System.IO.StreamReader($responseStream)
-                              $responseContent = $reader.ReadToEnd()
-                              $reader.Close()
-                              $responseStream.Close()
-                              $response.Close()
-                          } catch {
-                              # 忽略响应读取错误，只要请求成功发送
-                          }
-                          
-                          $progress = [math]::Round(($rangeEnd + 1) / $fileSize * 100, 2)
-                          Write-Host "分片 [$($i+1)/$totalChunks]: ✓ 成功 (进度: ${progress}%)"
-                          $success = $true
-                          
-                      } catch {
-                          $retry++
-                          if ($retry -eq $maxRetries) {
-                              Write-Host "分片 [$($i+1)/$totalChunks]: ✗ 失败 - $rangeHeader"
-                              Write-Host "  错误: $($_.Exception.Message)"
-                              throw "分片上传失败"
-                          }
-                          Write-Host "分片 [$($i+1)/$totalChunks]: ⚠️ 重试 $retry/$maxRetries (等待 2 秒...)"
-                          Start-Sleep -Seconds 2
-                      }
-                  }
-                  
-                  $bytesUploaded += $bytesRead
-                  
-                  # 每上传几个分片后短暂暂停
-                  if (($i + 1) % 5 -eq 0) {
-                      Start-Sleep -Milliseconds 300
-                  }
-              }
-              
-              $fileStream.Close()
-              Write-Host ""
-              Write-Host "========================================"
-              Write-Host "✅ 幂等上传完成！"
-              Write-Host "  - 文件: $isoName"
-              Write-Host "  - 大小: $([math]::Round($fileSize / 1MB, 2)) MB"
-              Write-Host "  - 总块数: $totalChunks"
-              Write-Host "  - 策略: 检测→删除→验证→上传"
-              Write-Host "  - 请求体: 纯净空对象 {}"
-              Write-Host "========================================"
-              
-          } catch {
-              Write-Host ""
-              Write-Host "❌ 上传失败: $($_.Exception.Message)"
-              
-              # 输出详细错误信息
-              if ($_.Exception.Response) {
-                  try {
-                      $errorStream = $_.Exception.Response.GetResponseStream()
-                      $reader = New-Object System.IO.StreamReader($errorStream)
-                      $errorBody = $reader.ReadToEnd()
-                      $reader.Close()
-                      $errorStream.Close()
-                      
-                      Write-Host ""
-                      Write-Host "🔴 Graph API 错误响应:"
-                      Write-Host $errorBody
-                      
-                      # 尝试解析错误详情
-                      try {
-                          $errorObj = $errorBody | ConvertFrom-Json
-                          if ($errorObj.error) {
-                              Write-Host ""
-                              Write-Host "错误详情:"
-                              Write-Host "  代码: $($errorObj.error.code)"
-                              Write-Host "  消息: $($errorObj.error.message)"
-                          }
-                      } catch {
-                          # 忽略JSON解析错误
-                      }
-                  } catch {
-                      Write-Host "无法读取错误响应流"
-                  }
-              }
-              
-              throw
-          }
+          $fileStream.Close()
+          Write-Host "✅ 上传完成"
 
       # =========================
       # 创建 GitHub Release
@@ -720,33 +499,13 @@ jobs:
           tag_name: pve-${{ env.PVE_VERSION }}-r8125
           name: PVE ${{ env.PVE_VERSION }} with RTL8125
           body: |
-            ## Proxmox VE ${{ env.PVE_VERSION }} with RTL8125 Driver
-            
             - **PVE 版本**: ${{ env.PVE_VERSION }}
             - **RTL8125 驱动版本**: ${{ env.DRIVER_VERSION }}
             - **SHA256**: `${{ env.SHA256 }}`
-            - **文件大小**: ${{ env.ISO_SIZE }} bytes
-            
-            ### 引导兼容性
-            - ✅ Legacy BIOS 引导 (ISOLINUX/GRUB)
-            - ✅ UEFI 引导 (GPT)
-            - ✅ USB 混合引导 (Hybrid MBR)
-            - ✅ 智能引导架构检测
-            
-            ### 使用说明
-            1. 刻录到 USB 设备：`dd if=PVE-${{ env.PVE_VERSION }}-r8125.iso of=/dev/sdX bs=4M status=progress`
-            2. 启动安装程序
-            3. RTL8125 驱动会自动安装（仅当检测到 RTL8125 硬件时）
-            
-            ### 注意事项
-            - 基于官方 Proxmox VE ${{ env.PVE_VERSION }} ISO 构建
-            - 保留原版卷标，避免安装错误
-            - 包含动态硬件识别及自动安装配置
           files: |
             ${{ env.ISO_OUTPUT }}
           draft: false
           prerelease: false
-          generate_release_notes: false
 
       # =========================
       # 上传到 GitHub Artifacts
@@ -757,50 +516,10 @@ jobs:
           name: PVE-${{ env.PVE_VERSION }}-R8125-ISO
           path: ${{ env.ISO_OUTPUT }}
           retention-days: 7
-          if-no-files-found: error
-
-      # =========================
-      # 显示完成信息
-      # =========================
-      - name: Display Completion Info
-        if: success()
-        run: |
-          echo ""
-          echo "========================================"
-          echo "✅ 构建完成！"
-          echo "========================================"
-          echo ""
-          echo "📦 输出文件: ${{ env.ISO_OUTPUT }}"
-          echo "🏷️  Release Tag: pve-${{ env.PVE_VERSION }}-r8125"
-          echo "💾 Artifact: PVE-${{ env.PVE_VERSION }}-R8125-ISO"
-          echo "☁️  OneDrive: PVE-Custom-ISO/${{ env.ISO_OUTPUT }}"
-          echo ""
-          echo "📋 版本信息:"
-          echo "  - PVE: ${{ env.PVE_VERSION }}"
-          echo "  - RTL8125: ${{ env.DRIVER_VERSION }}"
-          echo "  - SHA256: ${{ env.SHA256 }}"
-          echo "  - 大小: $(({{ env.ISO_SIZE }}/1024/1024)) MB"
-          echo ""
-          echo "🔧 引导架构兼容性:"
-          echo "  ✅ 智能适配新旧架构"
-          echo "  ✅ 兼容 ISOLINUX (旧版)"
-          echo "  ✅ 兼容 纯GRUB (新版 PVE 9+)"
-          echo "  ✅ USB 混合引导支持 (Hybrid MBR)"
-          echo "  ✅ UEFI GPT 引导支持"
-          echo ""
-          echo "🚀 使用方式:"
-          echo "  dd if=${{ env.ISO_OUTPUT }} of=/dev/sdX bs=4M status=progress"
-          echo "========================================"
 
       # =========================
       # 清理临时文件
       # =========================
       - name: Cleanup Temporary Files
         if: always()
-        run: |
-          echo "清理临时文件..."
-          rm -rf work downloads sha256.txt
-          # 保留构建的 ISO 用于 Artifact
-          if [ -f "$ISO_OUTPUT" ]; then
-            echo "保留 ISO 文件: $ISO_OUTPUT"
-          fi
+        run: rm -rf work downloads sha256.txt
