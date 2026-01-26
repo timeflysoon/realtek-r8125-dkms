@@ -400,7 +400,7 @@ EOF
         if: always()
         run: |
           echo "清理临时文件..."
-          rm -rf work drivers
+          rm -rf work drivers sha256.txt
           # 可选：保留原始 ISO 用于缓存和调试，不删除
           # rm -f "$ISO_ORIG"
 
