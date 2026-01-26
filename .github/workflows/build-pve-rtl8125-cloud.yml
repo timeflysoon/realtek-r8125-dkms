@@ -286,7 +286,7 @@ jobs:
           }
 
       # =========================
-      # 构建自定义 ISO (增强型驱动集成与路径识别)
+      # 构建自定义 ISO
       # =========================
       - name: Build Custom ISO
         run: |
@@ -300,15 +300,14 @@ jobs:
           xorriso -osirrox on -indev "$ISO_ORIG" -extract / work/iso
           chmod -R +w work/iso
           
-          echo "2. 注入 RTL8125 驱动包..."
+          echo "2. 添加 RTL8125 驱动包..."
           # 为确保路径兼容性，驱动将同时存放在多个备选位置
           mkdir -p work/iso/pool/extras
           cp "$DRIVER_FILE" work/iso/pool/extras/
           cp "$DRIVER_FILE" work/iso/
           
-          echo "3. 配置 Preseed（兼容新旧安装器 + 增强路径识别）"
+          echo ">>> 3. 配置 Preseed (Grok 逻辑修正版)"
           PRESEED_FILE="work/iso/preseed.cfg"
-          # 整合 Grok 的路径遍历严谨性与 DeepSeek 的可读性逻辑
           cat > "$PRESEED_FILE" << 'EOF'
           # 兼容 d-i (旧版) 和 pve-installer (新版)
           d-i preseed/late_command string \
@@ -317,30 +316,29 @@ jobs:
                 echo "Detected RTL8125 (10ec:8125), starting driver installation..."; \
                 mount /cdrom 2>/dev/null || true; \
                 FOUND_DEB=""; \
-                # 遍历搜索 ISO 根目录及所有可能的 pool 路径 \
-                for p in "/cdrom/realtek-r8125-dkms"*.deb "/cdrom/pool/extras/realtek-r8125-dkms"*.deb "/cdrom/pool/main/r/realtek-r8125-dkms/"*.deb; do \
-                  if [ -f "$p" ]; then FOUND_DEB="$p"; break; fi; \
+                for dir in "/cdrom" "/cdrom/pool/extras" "/cdrom/pool/main/r/realtek-r8125-dkms"; do \
+                  if [ -d "$dir" ]; then \
+                    for deb in "$dir"/*r8125*.deb; do \
+                      if [ -f "$deb" ]; then FOUND_DEB="$deb"; break 2; fi; \
+                    done; \
+                  fi; \
                 done; \
                 if [ -n "$FOUND_DEB" ]; then \
-                  echo "Found package at $FOUND_DEB, installing..."; \
-                  dpkg -i "$FOUND_DEB" || true; \
-                  # 彻底屏蔽 r8169 (包含 install /bin/true 强效模式) \
-                  CONF_FILE="/etc/modprobe.d/blacklist-realtek.conf"; \
+                  echo "Found package: $FOUND_DEB → installing..."; \
+                  dpkg --force-depends -i "$FOUND_DEB" || true; \
+                  CONF_FILE="/etc/modprobe.d/r8125-blacklist.conf"; \
                   echo "blacklist r8169" > "$CONF_FILE"; \
                   echo "install r8169 /bin/true" >> "$CONF_FILE"; \
-                  # 关键：更新 initramfs 确保驱动在引导阶段生效 \
-                  echo "Updating initramfs for all kernels..."; \
-                  update-initramfs -u -k all || echo "initramfs update failed, but continuing..."; \
+                  echo "Updating initramfs..."; \
+                  update-initramfs -u -k all || echo "WARNING: initramfs update failed"; \
                   depmod -a; \
-                  # 尝试即时切换驱动 \
                   modprobe -r r8169 2>/dev/null || true; \
-                  modprobe r8125 2>/dev/null && echo "RTL8125 driver loaded." || echo "Reboot required to load r8125."; \
+                  modprobe r8125 2>/dev/null && echo "r8125 loaded successfully." || echo "r8125 load deferred (reboot needed)."; \
                 else \
-                  echo "ERROR: Driver package not found on /cdrom!"; \
-                  exit 1; \
+                  echo "ERROR: No *r8125*.deb found anywhere under /cdrom!"; \
                 fi; \
               else \
-                echo "RTL8125 not detected, skipping driver installation."; \
+                echo "RTL8125 not detected → skipping."; \
               fi \
             '
           EOF
