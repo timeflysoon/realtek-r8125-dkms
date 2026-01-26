@@ -39,16 +39,10 @@ jobs:
           sudo apt-get update
           # 添加 isolinux 包以获取 isohdpfx.bin（为旧版 PVE 准备）
           sudo apt-get install -y xorriso curl file jq isolinux
-      # =========================
-      # 解析 ISO URL 以获取文件名（用于缓存和下载）
-      # =========================
       - name: Parse ISO URL for filename
         run: |
           ISO_ORIG=$(basename "${{ inputs.proxmox_iso_url }}")
           echo "ISO_ORIG=$ISO_ORIG" >> $GITHUB_ENV
-      # =========================
-      # 缓存 Proxmox ISO
-      # =========================
       - name: Cache Proxmox ISO
         id: cache-iso
         uses: actions/cache@v4
@@ -57,9 +51,6 @@ jobs:
           key: pve-iso-${{ env.ISO_ORIG }}-${{ github.run_id }}
           restore-keys: |
             pve-iso-${{ env.ISO_ORIG }}
-      # =========================
-      # 下载 Proxmox ISO（如果未缓存）
-      # =========================
       - name: Download Proxmox ISO
         if: steps.cache-iso.outputs.cache-hit != 'true'
         run: |
@@ -67,9 +58,6 @@ jobs:
           echo ">>> ISO 文件信息："
           ls -lh "$ISO_ORIG"
           file "$ISO_ORIG"
-      # =========================
-      # 验证 ISO 完整性
-      # =========================
       - name: Verify ISO integrity
         if: steps.cache-iso.outputs.cache-hit != 'true'
         run: |
@@ -79,21 +67,14 @@ jobs:
             echo "❌ ISO 文件过小，可能下载失败"
             exit 1
           fi
-        
-          # 检查 ISO 是否包含必要的目录
           if ! xorriso -indev "$ISO_ORIG" -toc 2>&1 | grep -q "Media summary"; then
             echo "❌ ISO 文件损坏或格式不正确"
             exit 1
           fi
           echo "✅ ISO 验证通过"
-      # =========================
-      # 解析配置（自动生成所有变量）
-      # =========================
       - name: Parse configuration and setup variables
         run: |
           echo "ISO_ORIG=$ISO_ORIG"
-         
-          # 1. 解析 PVE 版本 (用于文件名)
           if [[ "$ISO_ORIG" =~ proxmox-ve_([0-9]+\.[0-9]+(-[0-9]+)?)\.iso$ ]]; then
             PVE_VERSION="${BASH_REMATCH[1]}"
             echo "PVE_VERSION=$PVE_VERSION" >> $GITHUB_ENV
@@ -103,44 +84,29 @@ jobs:
             echo "预期格式: proxmox-ve_X.Y-Z.iso"
             exit 1
           fi
-          # 2. 【完美修正】使用 blkid 提取原版 ISO 卷标
-          # blkid 能直接输出干净的 Label，无需正则清洗
           echo ">>> 提取原版 ISO 卷标..."
           ORIG_LABEL=$(blkid -o value -s LABEL "$ISO_ORIG")
-         
           if [ -z "$ORIG_LABEL" ]; then
              echo "⚠️ 无法提取卷标，使用文件名推断"
-             # 兜底：PVE 官方格式通常是 PVE_x.x
              ORIG_LABEL="PVE_${PVE_VERSION%.*}"
           fi
-         
           echo "✅ 沿用原版卷标: $ORIG_LABEL"
           echo "ISO_LABEL=$ORIG_LABEL" >> $GITHUB_ENV
-         
-          # 3. 解析 RTL8125 驱动 URL
           DRIVER_URL="${{ inputs.r8125_driver_url }}"
-        
-          # 提取仓库、标签、文件名等信息
-          # 格式: https://github.com/{owner}/{repo}/releases/download/{tag}/{filename}
           if [[ "$DRIVER_URL" =~ https://github.com/([^/]+)/([^/]+)/releases/download/([^/]+)/(.+) ]]; then
             OWNER="${BASH_REMATCH[1]}"
             REPO="${BASH_REMATCH[2]}"
             TAG="${BASH_REMATCH[3]}"
             FILENAME="${BASH_REMATCH[4]}"
-          
             echo "DRIVER_OWNER=$OWNER" >> $GITHUB_ENV
             echo "DRIVER_REPO=$REPO" >> $GITHUB_ENV
             echo "DRIVER_TAG=$TAG" >> $GITHUB_ENV
             echo "DRIVER_FILENAME=$FILENAME" >> $GITHUB_ENV
-          
-            # 提取显示版本（从文件名中提取版本号）
             if [[ "$FILENAME" =~ realtek-r8125-dkms_([^_]+)_amd64\.deb ]]; then
               echo "DRIVER_DISPLAY_VERSION=${BASH_REMATCH[1]}" >> $GITHUB_ENV
             else
-              # 如果文件名格式不匹配，使用标签作为版本
               echo "DRIVER_DISPLAY_VERSION=$TAG" >> $GITHUB_ENV
             fi
-          
             echo ">>> 驱动解析结果："
             echo "所有者: $OWNER"
             echo "仓库: $REPO"
@@ -152,23 +118,17 @@ jobs:
             echo "URL 格式应为: https://github.com/owner/repo/releases/download/tag/filename"
             exit 1
           fi
-      # =========================
-      # 检查是否需要重建（修正：强制重建时删除已存在的 Release）
-      # =========================
       - name: Check if rebuild is needed
         id: check-rebuild
         run: |
           SKIP=false
           if [ "${{ inputs.force_rebuild }}" = "true" ]; then
             echo ">>> 强制重新构建模式"
-           
-            # 删除已存在的 Release（幂等操作）
             echo "检查并删除已存在的 Release..."
             RELEASE_INFO=$(curl -s \
               -H "Authorization: token ${{ github.token }}" \
               -H "Accept: application/vnd.github.v3+json" \
               "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/pve-${PVE_VERSION}-r8125")
-           
             if [ "$(echo "$RELEASE_INFO" | jq -r '.message // "exists"')" != "Not Found" ]; then
               RELEASE_ID=$(echo "$RELEASE_INFO" | jq -r '.id')
               echo "删除 Release ID: $RELEASE_ID"
@@ -180,7 +140,6 @@ jobs:
             else
               echo "✅ 没有现有的 Release 需要删除"
             fi
-           
             SKIP=false
           else
             echo ">>> 检查现有 Release"
@@ -188,7 +147,6 @@ jobs:
               -H "Authorization: token ${{ github.token }}" \
               -H "Accept: application/vnd.github.v3+json" \
               "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/pve-${PVE_VERSION}-r8125")
-           
             if [ "$(echo "$RELEASE_INFO" | jq -r '.message // "exists"')" != "Not Found" ]; then
               echo "✅ 已存在版本 ${PVE_VERSION}-r8125 的 Release，跳过构建"
               SKIP=true
@@ -197,9 +155,6 @@ jobs:
             fi
           fi
           echo "skip_build=$SKIP" >> $GITHUB_OUTPUT
-      # =========================
-      # 下载私有仓库 RTL8125 DKMS
-      # =========================
       - name: Download RTL8125 Driver from Private Repo
         if: ${{ steps.check-rebuild.outputs.skip_build != 'true' }}
         env:
@@ -207,22 +162,17 @@ jobs:
         run: |
           set -e
           mkdir -p drivers
-        
           echo ">>> 驱动下载配置"
           echo "完整URL: ${{ inputs.r8125_driver_url }}"
           echo "仓库: $DRIVER_OWNER/$DRIVER_REPO"
           echo "标签: $DRIVER_TAG"
           echo "文件名: $DRIVER_FILENAME"
-        
           echo ">>> 通过 GitHub API 获取资源下载URL"
-        
-          # 使用 GitHub API 获取资源的真实下载URL
           ASSET_URL=$(curl -s \
             -H "Authorization: Bearer $PAT" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/$DRIVER_OWNER/$DRIVER_REPO/releases/tags/$DRIVER_TAG" \
             | jq -r ".assets[] | select(.name == \"$DRIVER_FILENAME\") | .url")
-        
           if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
             echo "❌ 无法获取资源URL，请检查："
             echo " 1. 仓库是否存在: $DRIVER_OWNER/$DRIVER_REPO"
@@ -231,41 +181,30 @@ jobs:
             echo " 4. PAT 是否有访问权限"
             exit 1
           fi
-        
           echo "✅ 资源API URL 获取成功"
           DRIVER_FILE="drivers/$DRIVER_FILENAME"
           echo "DRIVER_FILE=$DRIVER_FILE" >> $GITHUB_ENV
-        
           echo ">>> 下载驱动文件"
-        
-          # 使用 API URL 下载，需要添加 Accept header
           curl -fL \
             -H "Authorization: Bearer $PAT" \
             -H "Accept: application/octet-stream" \
             --retry 3 \
             -o "$DRIVER_FILE" \
             "$ASSET_URL"
-        
           echo "✅ 驱动下载完成"
           echo ">>> 驱动文件信息:"
           ls -lh "$DRIVER_FILE"
           file "$DRIVER_FILE"
-        
           SIZE=$(stat -c%s "$DRIVER_FILE")
           echo "驱动大小: $SIZE bytes"
-        
           if [ "$SIZE" -lt 50000 ]; then
             echo "❌ 驱动文件过小，可能下载失败"
             exit 1
           fi
-      # =========================
-      # 构建 ISO (智能适配 PVE 8.2+ 纯GRUB架构)
-      # =========================
       - name: Build Custom ISO
         if: steps.check-rebuild.outputs.skip_build != 'true'
         run: |
           rm -rf work && mkdir -p work/iso
-         
           echo ">>> 1. 解包 ISO"
           xorriso -osirrox on -indev "$ISO_ORIG" -extract / work/iso
           chmod -R +w work/iso
@@ -274,50 +213,34 @@ jobs:
           cp "$DRIVER_FILE" work/iso/pool/extras/
           echo ">>> 3. 配置 Preseed (智能识别 RTL8125)"
           PRESEED="work/iso/preseed.cfg"
-         
-          # 保留原preseed内容（如果有），并追加动态判断逻辑
           if [ -f "$PRESEED" ]; then
-            # 移除可能存在的旧版驱动安装命令
             grep -v "r8125" "$PRESEED" > "${PRESEED}.tmp" || true
             mv "${PRESEED}.tmp" "$PRESEED"
           fi
-         
-          # 使用 'EOF' 引用 Here Doc，防止 $ 符号被 GitHub Action 的宿主机环境误解析
-          # 优化：保持静默安装，避免 update-initramfs 日志让用户误以为卡死
           cat >> "$PRESEED" << 'EOF'
 d-i preseed/late_command string in-target sh -c '
   if lspci -n | grep -q "10ec:8125"; then
-    # 静默安装驱动，避免干扰安装界面
     dpkg -i /cdrom/pool/extras/*.deb > /dev/null 2>&1
     echo "blacklist r8169" > /etc/modprobe.d/blacklist-r8169.conf
-    # 启用 ASPM 节能（如果 BIOS 支持）
     echo "options r8125 aspm=1" > /etc/modprobe.d/r8125.conf
     depmod -a > /dev/null 2>&1
-    # 静默更新 initramfs，避免 PVE 9.x 安装界面显示过多日志
     update-initramfs -u > /dev/null 2>&1
   fi
 '
 EOF
           echo ">>> 4. 智能判断引导模式 (关键修复)"
-         
-          # 寻找 EFI 引导文件 (所有版本都有)
           FULL_EFI=$(find work/iso -name efi.img | head -1)
           if [ -z "$FULL_EFI" ]; then echo "❌ 找不到 efi.img"; exit 1; fi
           REL_EFI=${FULL_EFI#work/iso/}
           echo "EFI Image: $REL_EFI"
-          # 寻找 Legacy BIOS 引导文件 (Isolinux vs GRUB)
           FULL_ISOLINUX=$(find work/iso -name isolinux.bin | head -1)
           FULL_GRUB_BIOS=$(find work/iso -name eltorito.img | head -1)
-         
           XORRISO_ARGS=""
           if [ -n "$FULL_ISOLINUX" ]; then
             echo "✅ 检测到旧版架构 (Isolinux)"
             REL_ISOLINUX=${FULL_ISOLINUX#work/iso/}
             REL_BOOT_CAT=$(dirname "$REL_ISOLINUX")/boot.cat
-           
-            # 寻找宿主机 MBR 模板
             HOST_MBR=$(find /usr -name isohdpfx.bin | head -1)
-           
             XORRISO_ARGS="-isohybrid-mbr $HOST_MBR \
               -b $REL_ISOLINUX \
               -c $REL_BOOT_CAT \
@@ -325,24 +248,16 @@ EOF
               -eltorito-alt-boot \
               -e $REL_EFI \
               -no-emul-boot -isohybrid-gpt-basdat"
-             
           elif [ -n "$FULL_GRUB_BIOS" ]; then
             echo "✅ 检测到新版架构 (Pure GRUB, PVE 8.2+)"
-           
             REL_GRUB_BIOS=${FULL_GRUB_BIOS#work/iso/}
-           
-            # 纯 GRUB 模式下，不需要宿主机的 isohdpfx.bin，也不需要 boot.cat
-            # 使用 --grub2-boot-info 参数
-           
             XORRISO_ARGS="-b $REL_GRUB_BIOS \
               -no-emul-boot -boot-load-size 4 -boot-info-table --grub2-boot-info \
               -eltorito-alt-boot \
               -e $REL_EFI \
               -no-emul-boot -isohybrid-gpt-basdat"
-             
           else
             echo "❌ 致命错误：找不到 Isolinux 也就罢了，连 GRUB 的 eltorito.img 也没找到！"
-            echo ">>> 正在列出 /boot 目录结构供调试："
             find work/iso/boot -maxdepth 4
             exit 1
           fi
@@ -353,14 +268,10 @@ EOF
             -J -joliet-long -cache-inodes \
             $XORRISO_ARGS \
             work/iso
-           
           echo ">>> ISO 构建完成"
           ls -lh "$ISO_OUTPUT"
           sha256sum "$ISO_OUTPUT" | tee sha256.txt
           echo "SHA256=$(cut -d' ' -f1 sha256.txt)" >> $GITHUB_ENV
-      # =========================
-      # 发布 Release
-      # =========================
       - name: Create GitHub Release
         if: ${{ steps.check-rebuild.outputs.skip_build != 'true' }}
         uses: softprops/action-gh-release@v2
@@ -386,13 +297,9 @@ EOF
           draft: false
           prerelease: false
           generate_release_notes: false
-      # =========================
-      # 清理临时文件
-      # =========================
       - name: Cleanup
         if: always()
         run: |
           echo "清理临时文件..."
           rm -rf work drivers
-          # 可选：保留原始 ISO 用于缓存和调试，不删除
           # rm -f "$ISO_ORIG"
