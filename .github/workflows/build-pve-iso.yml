@@ -280,13 +280,36 @@ jobs:
           cat > "$PRESEED" << 'EOF'
           # 兼容 d-i (旧版) 和 pve-installer (新版)
           d-i preseed/late_command string \
-            in-target sh -c "if lspci -n | grep -q '10ec:8125'; then \
-              echo 'Detected RTL8125, installing driver...'; \
-              dpkg -i /cdrom/pool/extras/*.deb; \
-              echo 'blacklist r8169' >> /etc/modprobe.d/blacklist-pve.conf; \
-              depmod -a; \
-              modprobe r8125; \
-            else echo 'RTL8125 not detected, skipping.'; fi"
+            in-target sh -c ' \
+              if lspci -n | grep -q "10ec:8125"; then \
+                echo "Detected RTL8125 (10ec:8125), starting driver installation..."; \
+                mount /cdrom 2>/dev/null || true; \
+                FOUND_DEB=""; \
+                for dir in "/cdrom" "/cdrom/pool/extras" "/cdrom/pool/main/r/realtek-r8125-dkms"; do \
+                  if [ -d "$dir" ]; then \
+                    for deb in "$dir"/*r8125*.deb; do \
+                      if [ -f "$deb" ]; then FOUND_DEB="$deb"; break 2; fi; \
+                    done; \
+                  fi; \
+                done; \
+                if [ -n "$FOUND_DEB" ]; then \
+                  echo "Found package: $FOUND_DEB → installing..."; \
+                  dpkg --force-depends -i "$FOUND_DEB" || true; \
+                  CONF_FILE="/etc/modprobe.d/r8125-blacklist.conf"; \
+                  echo "blacklist r8169" > "$CONF_FILE"; \
+                  echo "install r8169 /bin/true" >> "$CONF_FILE"; \
+                  echo "Updating initramfs..."; \
+                  update-initramfs -u -k all || echo "WARNING: initramfs update failed"; \
+                  depmod -a; \
+                  modprobe -r r8169 2>/dev/null || true; \
+                  modprobe r8125 2>/dev/null && echo "r8125 loaded successfully." || echo "r8125 load deferred (reboot needed)."; \
+                else \
+                  echo "ERROR: No *r8125*.deb found anywhere under /cdrom!"; \
+                fi; \
+              else \
+                echo "RTL8125 not detected → skipping."; \
+              fi \
+            '
           EOF
           echo "✅ 自动安装配置已添加（含硬件检测逻辑）"
 
