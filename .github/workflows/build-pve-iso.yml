@@ -122,14 +122,18 @@ jobs:
         id: check-rebuild
         run: |
           SKIP=false
+          
           if [ "${{ inputs.force_rebuild }}" = "true" ]; then
             echo ">>> 强制重新构建模式"
             echo "检查并删除已存在的 Release..."
+            
             RELEASE_INFO=$(curl -s \
               -H "Authorization: token ${{ github.token }}" \
               -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/pve-${PVE_VERSION}-r8125")
-            if [ "$(echo "$RELEASE_INFO" | jq -r '.message // "exists"')" != "Not Found" ]; then
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/pve-${{ env.PVE_VERSION }}-r8125")
+            
+            MESSAGE=$(echo "$RELEASE_INFO" | jq -r '.message // empty')
+            if [ "$MESSAGE" != "Not Found" ]; then
               RELEASE_ID=$(echo "$RELEASE_INFO" | jq -r '.id')
               echo "删除 Release ID: $RELEASE_ID"
               curl -s -X DELETE \
@@ -140,20 +144,25 @@ jobs:
             else
               echo "✅ 没有现有的 Release 需要删除"
             fi
+            
             SKIP=false
           else
             echo ">>> 检查现有 Release"
+            
             RELEASE_INFO=$(curl -s \
               -H "Authorization: token ${{ github.token }}" \
               -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/pve-${PVE_VERSION}-r8125")
-            if [ "$(echo "$RELEASE_INFO" | jq -r '.message // "exists"')" != "Not Found" ]; then
-              echo "✅ 已存在版本 ${PVE_VERSION}-r8125 的 Release，跳过构建"
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/pve-${{ env.PVE_VERSION }}-r8125")
+            
+            MESSAGE=$(echo "$RELEASE_INFO" | jq -r '.message // empty')
+            if [ "$MESSAGE" != "Not Found" ]; then
+              echo "✅ 已存在版本 ${{ env.PVE_VERSION }}-r8125 的 Release，跳过构建"
               SKIP=true
             else
               echo ">>> 未找到现有 Release，继续构建"
             fi
           fi
+          
           echo "skip_build=$SKIP" >> $GITHUB_OUTPUT
       - name: Download RTL8125 Driver from Private Repo
         if: ${{ steps.check-rebuild.outputs.skip_build != 'true' }}
@@ -302,4 +311,5 @@ EOF
         run: |
           echo "清理临时文件..."
           rm -rf work drivers
+          # 可选：保留原始 ISO 用于缓存和调试，不删除
           # rm -f "$ISO_ORIG"
