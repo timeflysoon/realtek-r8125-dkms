@@ -37,7 +37,6 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          # 添加 isolinux 包以获取 isohdpfx.bin（为旧版 PVE 准备）
           sudo apt-get install -y xorriso curl file jq isolinux
       - name: Parse ISO URL for filename
         run: |
@@ -63,7 +62,7 @@ jobs:
         run: |
           echo "验证 ISO 完整性..."
           ISO_SIZE=$(stat -c%s "$ISO_ORIG")
-          if [ "$ISO_SIZE" -lt 1000000000 ]; then # 小于1GB
+          if [ "$ISO_SIZE" -lt 1000000000 ]; then
             echo "❌ ISO 文件过小，可能下载失败"
             exit 1
           fi
@@ -87,8 +86,8 @@ jobs:
           echo ">>> 提取原版 ISO 卷标..."
           ORIG_LABEL=$(blkid -o value -s LABEL "$ISO_ORIG")
           if [ -z "$ORIG_LABEL" ]; then
-             echo "⚠️ 无法提取卷标，使用文件名推断"
-             ORIG_LABEL="PVE_${PVE_VERSION%.*}"
+            echo "⚠️ 无法提取卷标，使用文件名推断"
+            ORIG_LABEL="PVE_${PVE_VERSION%.*}"
           fi
           echo "✅ 沿用原版卷标: $ORIG_LABEL"
           echo "ISO_LABEL=$ORIG_LABEL" >> $GITHUB_ENV
@@ -122,18 +121,17 @@ jobs:
         id: check-rebuild
         run: |
           SKIP=false
-          
+
           if [ "${{ inputs.force_rebuild }}" = "true" ]; then
             echo ">>> 强制重新构建模式"
             echo "检查并删除已存在的 Release..."
-            
+
             RELEASE_INFO=$(curl -s \
               -H "Authorization: token ${{ github.token }}" \
               -H "Accept: application/vnd.github.v3+json" \
               "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/pve-${{ env.PVE_VERSION }}-r8125")
-            
-            MESSAGE=$(echo "$RELEASE_INFO" | jq -r '.message // empty')
-            if [ "$MESSAGE" != "Not Found" ]; then
+
+            if echo "$RELEASE_INFO" | jq -e '.id' > /dev/null; then
               RELEASE_ID=$(echo "$RELEASE_INFO" | jq -r '.id')
               echo "删除 Release ID: $RELEASE_ID"
               curl -s -X DELETE \
@@ -144,25 +142,24 @@ jobs:
             else
               echo "✅ 没有现有的 Release 需要删除"
             fi
-            
+
             SKIP=false
           else
             echo ">>> 检查现有 Release"
-            
+
             RELEASE_INFO=$(curl -s \
               -H "Authorization: token ${{ github.token }}" \
               -H "Accept: application/vnd.github.v3+json" \
               "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/pve-${{ env.PVE_VERSION }}-r8125")
-            
-            MESSAGE=$(echo "$RELEASE_INFO" | jq -r '.message // empty')
-            if [ "$MESSAGE" != "Not Found" ]; then
+
+            if echo "$RELEASE_INFO" | jq -e '.id' > /dev/null; then
               echo "✅ 已存在版本 ${{ env.PVE_VERSION }}-r8125 的 Release，跳过构建"
               SKIP=true
             else
               echo ">>> 未找到现有 Release，继续构建"
             fi
           fi
-          
+
           echo "skip_build=$SKIP" >> $GITHUB_OUTPUT
       - name: Download RTL8125 Driver from Private Repo
         if: ${{ steps.check-rebuild.outputs.skip_build != 'true' }}
@@ -311,5 +308,3 @@ EOF
         run: |
           echo "清理临时文件..."
           rm -rf work drivers
-          # 可选：保留原始 ISO 用于缓存和调试，不删除
-          # rm -f "$ISO_ORIG"
