@@ -304,23 +304,21 @@ jobs:
           mkdir -p work/iso/pool/extras
           cp "$DRIVER_FILE" work/iso/pool/extras/
           
-          echo "3. 配置自动安装..."
+          echo "3. 配置 Preseed（兼容新旧安装器）"
           PRESEED_FILE="work/iso/preseed.cfg"
-          if [ ! -f "$PRESEED_FILE" ]; then
-            touch "$PRESEED_FILE"
-          fi
-          
-          # 添加 late_command
-          if ! grep -q "r8125" "$PRESEED_FILE" 2>/dev/null; then
-            {
-              echo '# 自动安装 RTL8125 驱动'
-              echo 'd-i preseed/late_command string \'
-              echo '  in-target sh -c "dpkg -i /cdrom/pool/extras/*.deb || true; \'
-              echo '  depmod -a; \'
-              echo '  modprobe r8125 || true"'
-            } >> "$PRESEED_FILE"
-            echo "✅ 自动安装配置已添加"
-          fi
+          # 使用 cat 覆盖写入，并加入硬件识别逻辑
+          cat > "$PRESEED_FILE" << 'EOF'
+          # 兼容 d-i (旧版) 和 pve-installer (新版)
+          d-i preseed/late_command string \
+            in-target sh -c "if lspci -n | grep -q '10ec:8125'; then \
+              echo 'Detected RTL8125, installing driver...'; \
+              dpkg -i /cdrom/pool/extras/*.deb; \
+              echo 'blacklist r8169' >> /etc/modprobe.d/blacklist-pve.conf; \
+              depmod -a; \
+              modprobe r8125; \
+            else echo 'RTL8125 not detected, skipping.'; fi"
+          EOF
+          echo "✅ 自动安装配置已添加（含硬件检测逻辑）"
           
           echo "4. 智能识别引导架构 (动态查找文件)..."
           
@@ -738,12 +736,12 @@ jobs:
             ### 使用说明
             1. 刻录到 USB 设备：`dd if=PVE-${{ env.PVE_VERSION }}-r8125.iso of=/dev/sdX bs=4M status=progress`
             2. 启动安装程序
-            3. RTL8125 驱动会自动安装
+            3. RTL8125 驱动会自动安装（仅当检测到 RTL8125 硬件时）
             
             ### 注意事项
             - 基于官方 Proxmox VE ${{ env.PVE_VERSION }} ISO 构建
             - 保留原版卷标，避免安装错误
-            - 包含自动安装配置
+            - 包含动态硬件识别及自动安装配置
           files: |
             ${{ env.ISO_OUTPUT }}
           draft: false
