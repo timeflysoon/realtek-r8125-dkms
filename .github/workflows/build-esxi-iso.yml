@@ -12,7 +12,8 @@ jobs:
       OD_CLIENT_ID: ${{ secrets.OD_CLIENT_ID }}
       OD_CLIENT_SECRET: ${{ secrets.OD_CLIENT_SECRET }}
       OD_TENANT_ID: ${{ secrets.OD_TENANT_ID }}
-      SHARED_LINK: "https://xs9888outlook-my.sharepoint.com/my?id=%2Fpersonal%2Fx%5Fxs9888outlook%5Fonmicrosoft%5Fcom%2FDocuments%2FESXi%2DCustom%2DISO&viewid=5f3047b5-37d1-41fc-8f65-d63151c422ca"
+      OD_REFRESH_TOKEN: ${{ secrets.OD_REFRESH_TOKEN }}
+      # SHARED_LINK 已移除，改用直接路径 ESXi-Custom-ISO
 
     steps:
     - name: Checkout code
@@ -89,54 +90,50 @@ jobs:
         Import-Module VMware.ImageBuilder -ErrorAction Stop
         Write-Host "✅ ImageBuilder loaded successfully!"
 
-    # 步骤一：获取驱动信息（只用一次）
-    - name: Get Drive and Folder Information
+    # 步骤一：获取驱动信息（已更新为 Refresh Token 模式）
+    - name: Get Drive Information
       shell: pwsh
       id: get_drive_info
       run: |
-        Write-Host "=== 获取驱动和文件夹信息 ==="
+        Write-Host "=== 获取 OneDrive 驱动信息 ==="
         
+        # 使用 Refresh Token 获取 Access Token
         $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
         $body = @{
             client_id     = $env:OD_CLIENT_ID
-            scope         = "https://graph.microsoft.com/.default"
             client_secret = $env:OD_CLIENT_SECRET
-            grant_type    = "client_credentials"
+            refresh_token = $env:OD_REFRESH_TOKEN
+            grant_type    = "refresh_token"
         }
         
-        Write-Host "正在获取访问令牌..."
+        Write-Host "正在刷新访问令牌..."
         try {
             $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
             $token = ($tokenResponse.access_token).Trim()
             
-            if ([string]::IsNullOrEmpty($token)) {
-                throw "获取到的访问令牌为空"
-            }
-            Write-Host "✓ 访问令牌获取成功，长度: $($token.Length) 字符"
+            if ([string]::IsNullOrEmpty($token)) { throw "获取到的访问令牌为空" }
+            Write-Host "✓ 访问令牌刷新成功"
         } catch {
-            Write-Error "获取访问令牌失败: $_"
+            Write-Error "刷新访问令牌失败: $_"
             throw
         }
         
-        Write-Host "正在解析共享链接..."
-        $encodedLink = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($env:SHARED_LINK)).TrimEnd("=")
-        $shareUrl = "https://graph.microsoft.com/v1.0/shares/u!$encodedLink/driveItem"
-        
+        # 直接获取当前用户的 Drive ID
+        Write-Host "正在获取 Drive ID..."
         try {
             $headers = @{ Authorization = "Bearer $token" }
-            $driveItem = Invoke-RestMethod -Uri $shareUrl -Headers $headers -Method GET
+            # 获取 /me/drive 信息
+            $driveInfo = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/me/drive" -Headers $headers -Method GET
             
-            $driveId = $driveItem.parentReference.driveId
-            $folderItemId = $driveItem.id
-            $folderName = $driveItem.name
+            $driveId = $driveInfo.id
+            # 硬编码文件夹名，因为你确认它已存在
+            $folderName = "ESXi-Custom-ISO"
             
             Write-Host "✓ 驱动信息获取成功:"
             Write-Host "  - Drive ID: $driveId"
-            Write-Host "  - Folder Item ID: $folderItemId"
-            Write-Host "  - 文件夹名: $folderName"
+            Write-Host "  - 目标文件夹: $folderName"
             
             "driveId=$driveId" >> $env:GITHUB_OUTPUT
-            "folderItemId=$folderItemId" >> $env:GITHUB_OUTPUT
             "folderName=$folderName" >> $env:GITHUB_OUTPUT
             
         } catch {
@@ -144,28 +141,26 @@ jobs:
             throw
         }
 
-    # 步骤二：下载文件（独立获取token）
+    # 步骤二：下载文件（已更新为 Refresh Token 模式）
     - name: Download ESXi Depot Files
       shell: pwsh
       run: |
         Write-Host "=== 下载 ESXi Depot 文件 ==="
         
-        Write-Host "正在获取下载用的访问令牌..."
+        # 1. 获取 Token
         $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
         $body = @{
             client_id     = $env:OD_CLIENT_ID
-            scope         = "https://graph.microsoft.com/.default"
             client_secret = $env:OD_CLIENT_SECRET
-            grant_type    = "client_credentials"
+            refresh_token = $env:OD_REFRESH_TOKEN
+            grant_type    = "refresh_token"
         }
-        
         $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
         $token = ($tokenResponse.access_token).Trim()
-        Write-Host "✓ 下载令牌获取成功，长度: $($token.Length) 字符"
-       
+        
         $TEMP_DIR = Join-Path $env:TEMP "depots"
         New-Item -ItemType Directory -Path $TEMP_DIR -Force | Out-Null
-       
+        
         $files = @(
             "VMware-ESXi-8.0U3b-24280767-depot.zip",
             "nvme-community-driver_1.0.1.0-3vmw.700.1.0.15843807-component-18902434.zip",
@@ -176,20 +171,21 @@ jobs:
             "ESXi80U2-VMKUSB-NIC-FLING-67561870-component-22416446.zip",
             "ESXi80U3-VMKUSB-NIC-FLING-75399077-component-24052746.zip"
         )
-       
+        
         $headers = @{ Authorization = "Bearer $token" }
         $successCount = 0
         $driveId = "${{ steps.get_drive_info.outputs.driveId }}"
         $folderName = "${{ steps.get_drive_info.outputs.folderName }}"
-       
+        
         foreach ($file in $files) {
+            # 直接使用路径定位：/drives/{id}/root:/{folder}/{file}:/content
             $downloadUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${folderName}/${file}:/content"
             $outFile = Join-Path $TEMP_DIR $file
-           
+            
             Write-Host "下载: $file"
             try {
                 Invoke-RestMethod -Method GET -Uri $downloadUrl -Headers $headers -OutFile $outFile
-               
+                
                 if (Test-Path $outFile) {
                     $fileSize = (Get-Item $outFile).Length / 1MB
                     $successCount++
@@ -197,13 +193,15 @@ jobs:
                 }
             } catch {
                 Write-Host "✗ $file - $($_.Exception.Message)"
+                # 可选：打印详细错误以便调试
+                # Write-Host $_.Exception.Response.StatusCode
             }
         }
-       
+        
         if ($successCount -eq 0) {
-            throw "没有文件下载成功"
+            throw "没有文件下载成功，请检查 OneDrive 'ESXi-Custom-ISO' 文件夹内是否有对应文件"
         }
-       
+        
         Write-Host "下载完成: $successCount/$($files.Count) 个文件"
 
     - name: Build Custom ESXi ISO
@@ -212,19 +210,19 @@ jobs:
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
         $OutputEncoding = [System.Text.Encoding]::UTF8
-       
+        
         Write-Host ""
         Write-Host "================================================"
         Write-Host "ESXi 8.0U3b + RTL8125BG + NVMe + USB NIC"
         Write-Host "================================================"
         Write-Host ""
-       
+        
         Import-Module VMware.ImageBuilder
         Write-Host "ImageBuilder 模块已加载"
-       
+        
         Get-EsxSoftwareDepot | ForEach-Object { Remove-EsxSoftwareDepot $_ }
         Write-Host "已清除现有 depot"
-       
+        
         $TEMP_DIR = Join-Path $env:TEMP "depots"
         $baseDepotZip = Join-Path $TEMP_DIR "VMware-ESXi-8.0U3b-24280767-depot.zip"
         $nvmeDriverZip = Join-Path $TEMP_DIR "nvme-community-driver_1.0.1.0-3vmw.700.1.0.15843807-component-18902434.zip"
@@ -237,7 +235,7 @@ jobs:
             (Join-Path $TEMP_DIR "ESXi80U3-VMKUSB-NIC-FLING-75399077-component-24052746.zip")
         )
         $outIso = Join-Path $TEMP_DIR "ESXi-8.0U3b-24280767-RTL8125BG.iso"
-       
+        
         Write-Host "加载 depot 文件..."
         Add-EsxSoftwareDepot -Depot $baseDepotZip
         Add-EsxSoftwareDepot -Depot $nvmeDriverZip
@@ -246,20 +244,20 @@ jobs:
             if (Test-Path $_) { Add-EsxSoftwareDepot -Depot $_ }
         }
         Write-Host "所有 depot 已加载"
-       
+        
         $baseProfile = Get-EsxImageProfile | Where-Object { $_.Name -eq "ESXi-8.0U3b-24280767-standard" }
         if (-not $baseProfile) {
             throw "未找到基础镜像配置文件: ESXi-8.0U3b-24280767-standard"
         }
-       
+        
         $newProfile = New-EsxImageProfile -CloneProfile $baseProfile -Name "ESXi-8.0U3b-24280767-RTL8125BG" -Vendor "Custom"
         Write-Host "已创建自定义配置文件: $($newProfile.Name)"
-       
+        
         $packagesToInject = Get-EsxSoftwarePackage |
             Where-Object { $_.Name -match "re-driver|nvme|vmkusb" } |
             Group-Object -Property Name |
             ForEach-Object { $_.Group | Sort-Object Version -Descending | Select-Object -First 1 }
-       
+        
         Write-Host "注入驱动..."
         foreach ($pkg in $packagesToInject) {
             try {
@@ -269,10 +267,10 @@ jobs:
                 Write-Host "已存在: $($pkg.Name)"
             }
         }
-       
+        
         Write-Host "导出 ISO..."
         Export-EsxImageProfile -ImageProfile $newProfile -ExportToIso -FilePath $outIso -Force
-       
+        
         if (Test-Path $outIso) {
             $sizeMB = (Get-Item $outIso).Length / 1MB
             Write-Host ""
@@ -280,13 +278,13 @@ jobs:
             Write-Host "ISO 路径: $outIso"
             Write-Host "ISO 大小: $([math]::Round($sizeMB, 2)) MB"
             Write-Host ""
-           
+            
             "ISO_PATH=$outIso" >> $env:GITHUB_ENV
         } else {
             throw "ISO 创建失败"
         }
 
-    # 步骤四：幂等上传策略（最终纯净版）
+    # 步骤四：幂等上传策略（最终纯净版 - 已更新为 Refresh Token 模式）
     - name: Upload ISO with Idempotent Strategy (Pure)
       shell: pwsh
       run: |
@@ -298,7 +296,7 @@ jobs:
         Write-Host "========================================"
         Write-Host ""
         
-        # 0. 防御性编程：在步骤一开始就确保isoPath变量存在（这是您建议的关键改进）
+        # 0. 防御性编程：在步骤一开始就确保isoPath变量存在
         Write-Host "[0/7] 初始化ISO路径（防御性编程）..."
         $isoPath = $env:ISO_PATH
         if ([string]::IsNullOrEmpty($isoPath)) {
@@ -306,15 +304,15 @@ jobs:
             Write-Host "使用默认ISO路径: $isoPath"
         }
         
-        # 1. 获取全新的上传token（每次必须新token）
+        # 1. 获取全新的上传token（使用 Refresh Token）
         Write-Host ""
         Write-Host "[1/7] 获取全新的上传token..."
         $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
         $body = @{
             client_id     = $env:OD_CLIENT_ID
-            scope         = "https://graph.microsoft.com/.default"
             client_secret = $env:OD_CLIENT_SECRET
-            grant_type    = "client_credentials"
+            refresh_token = $env:OD_REFRESH_TOKEN
+            grant_type    = "refresh_token"
         }
         
         try {
@@ -324,7 +322,6 @@ jobs:
             if ([string]::IsNullOrEmpty($uploadToken)) {
                 throw "上传用token为空"
             }
-            
             Write-Host "✓ 全新上传token获取成功"
         } catch {
             Write-Error "获取上传token失败: $_"
@@ -345,45 +342,11 @@ jobs:
         Write-Host "  - 文件名: $isoName"
         Write-Host "  - 文件大小: $([math]::Round($fileSize / 1MB, 2)) MB"
         
-        # 3. 获取文件夹信息和drive信息
+        # 3. 准备驱动器和文件夹信息
         Write-Host ""
-        Write-Host "[3/7] 获取文件夹信息和drive信息..."
-        
-        # 获取全新的读取token（与上传token分开）
-        Write-Host "获取全新的读取token用于解析共享链接..."
-        $readTokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
-        $readToken = ($readTokenResponse.access_token).Trim()
-        Write-Host "✓ 读取token获取成功"
-        
-        # 解析共享链接获取详细信息
-        $encodedLink = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($env:SHARED_LINK)).TrimEnd("=")
-        $shareUrl = "https://graph.microsoft.com/v1.0/shares/u!$encodedLink/driveItem"
-        
-        try {
-            $headers = @{ Authorization = "Bearer $readToken" }
-            $driveItem = Invoke-RestMethod -Uri $shareUrl -Headers $headers -Method GET
-            
-            $driveId = $driveItem.parentReference.driveId
-            $folderName = $driveItem.name
-            
-            # 清理文件夹名中的URL编码
-            $folderName = [System.Uri]::UnescapeDataString($folderName)
-            
-            Write-Host "✓ 文件夹信息获取成功:"
-            Write-Host "  - Drive ID: $driveId"
-            Write-Host "  - 文件夹名: $folderName"
-            
-            # 确保文件夹名是正确的
-            if ([string]::IsNullOrEmpty($folderName)) {
-                $folderName = "ESXi-Custom-ISO"
-                Write-Host "⚠️ 使用默认文件夹名: $folderName"
-            }
-            
-        } catch {
-            Write-Host "⚠️ 获取文件夹信息失败，使用默认值"
-            $driveId = "${{ steps.get_drive_info.outputs.driveId }}"
-            $folderName = "ESXi-Custom-ISO"
-        }
+        Write-Host "[3/7] 准备路径信息..."
+        $driveId = "${{ steps.get_drive_info.outputs.driveId }}"
+        $folderName = "${{ steps.get_drive_info.outputs.folderName }}"
         
         # 4. 构建文件路径
         Write-Host ""
@@ -391,6 +354,7 @@ jobs:
         
         $encodedFolderName = [System.Uri]::EscapeDataString($folderName)
         $encodedIsoName = [System.Uri]::EscapeDataString($isoName)
+        # 直接使用 /drives/{id}/root:/{folder}/{file} 格式
         $fileUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}"
         
         Write-Host "文件完整URL:"
@@ -403,7 +367,6 @@ jobs:
         $uploadHeaders = @{ Authorization = "Bearer $uploadToken" }
         
         Write-Host "检查文件是否存在并尝试删除..."
-        
         try {
             # 尝试删除文件（幂等操作：删除不存在文件也返回成功）
             Invoke-RestMethod -Uri $fileUrl -Headers $uploadHeaders -Method DELETE
@@ -413,26 +376,16 @@ jobs:
             Write-Host "等待 2 秒确保删除操作完成..."
             Start-Sleep -Seconds 2
             
-            # 可选：验证文件确实被删除（增加稳定性）
-            Write-Host "验证文件是否确实不存在..."
-            try {
-                $checkResponse = Invoke-RestMethod -Uri $fileUrl -Headers $uploadHeaders -Method GET
-                Write-Host "⚠️ 文件仍然存在，尝试再次删除..."
-                Invoke-RestMethod -Uri $fileUrl -Headers $uploadHeaders -Method DELETE
-                Start-Sleep -Seconds 1
-            } catch {
-                if ($_.Exception.Response.StatusCode -eq 404) {
-                    Write-Host "✅ 确认文件已不存在"
-                }
-            }
-            
         } catch {
-            # 即使删除失败也继续尝试上传（降级处理）
-            Write-Host "⚠️ 删除操作异常: $($_.Exception.Message)"
-            Write-Host "  将继续尝试上传..."
+            # 即使删除失败也继续尝试上传（可能报404即不存在）
+            if ($_.Exception.Response.StatusCode -ne 404) {
+                 Write-Host "⚠️ 删除操作异常: $($_.Exception.Message)"
+            } else {
+                 Write-Host "✅ 文件原本就不存在"
+            }
         }
         
-        # 6. 创建上传会话（使用最简请求体，完全避免replace语义）
+        # 6. 创建上传会话
         Write-Host ""
         Write-Host "[6/7] 创建上传会话（纯净请求体）..."
         
@@ -448,13 +401,8 @@ jobs:
             "Content-Type" = "application/json"
         }
         
-        # 最纯净的请求体：空对象，完全避免replace语义
-        # 根据Microsoft Graph API文档，createUploadSession支持空请求体
-        # 默认冲突行为是"fail"，但由于文件已删除，实际上就是创建新文件
+        # 纯净请求体
         $bodyJson = @{} | ConvertTo-Json -Compress
-        
-        Write-Host "请求体（纯净空对象）: $bodyJson"
-        Write-Host ""
         
         try {
             Write-Host "正在发送创建上传会话请求..."
@@ -467,8 +415,6 @@ jobs:
             $uploadSessionUrl = $session.uploadUrl
             Write-Host ""
             Write-Host "✅ 上传会话创建成功！"
-            Write-Host "  - 使用稳定路径: /root:/${encodedFolderName}/${encodedIsoName}:"
-            Write-Host "  - 使用纯净请求体: {}"
             
             # 7. 执行分片上传
             Write-Host ""
@@ -509,7 +455,6 @@ jobs:
                         $requestStream.Write($buffer, 0, $bytesRead)
                         $requestStream.Close()
                         
-                        # 获取响应，忽略可能的读取错误
                         try {
                             $response = $request.GetResponse()
                             $responseStream = $response.GetResponseStream()
@@ -529,9 +474,7 @@ jobs:
                     } catch {
                         $retry++
                         if ($retry -eq $maxRetries) {
-                            Write-Host "分片 [$($i+1)/$totalChunks]: ✗ 失败 - $rangeHeader"
-                            Write-Host "  错误: $($_.Exception.Message)"
-                            throw "分片上传失败"
+                            throw "分片上传失败: $($_.Exception.Message)"
                         }
                         Write-Host "分片 [$($i+1)/$totalChunks]: ⚠️ 重试 $retry/$maxRetries (等待 2 秒...)"
                         Start-Sleep -Seconds 2
@@ -539,8 +482,6 @@ jobs:
                 }
                 
                 $bytesUploaded += $bytesRead
-                
-                # 每上传几个分片后短暂暂停
                 if (($i + 1) % 5 -eq 0) {
                     Start-Sleep -Milliseconds 300
                 }
@@ -550,47 +491,11 @@ jobs:
             Write-Host ""
             Write-Host "========================================"
             Write-Host "✅ 幂等上传完成！"
-            Write-Host "  - 文件: $isoName"
-            Write-Host "  - 大小: $([math]::Round($fileSize / 1MB, 2)) MB"
-            Write-Host "  - 总块数: $totalChunks"
-            Write-Host "  - 策略: 检测→删除→验证→上传"
-            Write-Host "  - 请求体: 纯净空对象 {}"
             Write-Host "========================================"
             
         } catch {
             Write-Host ""
             Write-Host "❌ 上传失败: $($_.Exception.Message)"
-            
-            # 输出详细错误信息
-            if ($_.Exception.Response) {
-                try {
-                    $errorStream = $_.Exception.Response.GetResponseStream()
-                    $reader = New-Object System.IO.StreamReader($errorStream)
-                    $errorBody = $reader.ReadToEnd()
-                    $reader.Close()
-                    $errorStream.Close()
-                    
-                    Write-Host ""
-                    Write-Host "🔴 Graph API 错误响应:"
-                    Write-Host $errorBody
-                    
-                    # 尝试解析错误详情
-                    try {
-                        $errorObj = $errorBody | ConvertFrom-Json
-                        if ($errorObj.error) {
-                            Write-Host ""
-                            Write-Host "错误详情:"
-                            Write-Host "  代码: $($errorObj.error.code)"
-                            Write-Host "  消息: $($errorObj.error.message)"
-                        }
-                    } catch {
-                        # 忽略JSON解析错误
-                    }
-                } catch {
-                    Write-Host "无法读取错误响应流"
-                }
-            }
-            
             throw
         }
 
