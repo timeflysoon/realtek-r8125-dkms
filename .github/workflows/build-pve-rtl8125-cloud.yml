@@ -6,15 +6,15 @@ on:
       proxmox_iso_filename:
         description: 'Proxmox ISO 文件名（在 OneDrive 中）'
         required: true
-        default: 'proxmox-ve_9.1-1.iso'
+        default: 'proxmox-ve_8.1-1.iso'
       r8125_driver_filename:
         description: 'RTL8125 驱动文件名（在 OneDrive 中）'
         required: true
-        default: 'realtek-r8125-dkms_9.016.01-1_amd64.deb'
+        default: 'realtek-r8125-dkms_9.012.04-1_amd64.deb'
       pve_custom_iso_link:
-        description: 'OneDrive PVE-Custom-ISO 共享链接'
+        description: 'OneDrive PVE-Custom-ISO 共享链接 (仅作占位，实际使用 PVE-Custom-ISO 文件夹)'
         required: true
-        default: 'https://xs9888outlook-my.sharepoint.com/my?id=%2Fpersonal%2Fx%5Fxs9888outlook%5Fonmicrosoft%5Fcom%2FDocuments%2FPVE%2DCustom%2DISO&viewid=5f3047b5-37d1-41fc-8f65-d63151c422ca'
+        default: 'https://xs9888outlook-my.sharepoint.com/...'
 
 permissions:
   contents: write
@@ -23,7 +23,8 @@ env:
   OD_CLIENT_ID: ${{ secrets.OD_CLIENT_ID }}
   OD_CLIENT_SECRET: ${{ secrets.OD_CLIENT_SECRET }}
   OD_TENANT_ID: ${{ secrets.OD_TENANT_ID }}
-  SHARED_LINK: ${{ github.event.inputs.pve_custom_iso_link }}
+  OD_REFRESH_TOKEN: ${{ secrets.OD_REFRESH_TOKEN }}
+  # SHARED_LINK 已移除，逻辑改为直接操作 PVE-Custom-ISO 文件夹
 
 jobs:
   build:
@@ -48,7 +49,7 @@ jobs:
           echo "  - curl/file/jq: 网络和文件处理工具"
 
       # =========================
-      # 获取 OneDrive 驱动和文件夹信息
+      # 获取 OneDrive 驱动和文件夹信息 (已更新为 Refresh Token)
       # =========================
       - name: Get OneDrive Drive and Folder Information
         id: get_drive_info
@@ -57,49 +58,45 @@ jobs:
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           $OutputEncoding = [System.Text.Encoding]::UTF8
           
-          Write-Host "=== 获取驱动和文件夹信息 ==="
+          Write-Host "=== 获取 OneDrive 驱动信息 ==="
           
+          # 使用 Refresh Token 获取 Access Token
           $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
           $body = @{
               client_id     = $env:OD_CLIENT_ID
-              scope         = "https://graph.microsoft.com/.default"
               client_secret = $env:OD_CLIENT_SECRET
-              grant_type    = "client_credentials"
+              refresh_token = $env:OD_REFRESH_TOKEN
+              grant_type    = "refresh_token"
           }
           
-          Write-Host "正在获取访问令牌..."
+          Write-Host "正在刷新访问令牌..."
           try {
               $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
               $token = ($tokenResponse.access_token).Trim()
               
-              if ([string]::IsNullOrEmpty($token)) {
-                  throw "获取到的访问令牌为空"
-              }
-              Write-Host "✓ 访问令牌获取成功"
+              if ([string]::IsNullOrEmpty($token)) { throw "获取到的访问令牌为空" }
+              Write-Host "✓ 访问令牌刷新成功"
           } catch {
-              Write-Error "获取访问令牌失败: $_"
+              Write-Error "刷新访问令牌失败: $_"
               throw
           }
           
-          Write-Host "正在解析共享链接..."
-          $encodedLink = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($env:SHARED_LINK)).TrimEnd("=")
-          $shareUrl = "https://graph.microsoft.com/v1.0/shares/u!$encodedLink/driveItem"
-          
+          # 直接获取当前用户的 Drive ID
+          Write-Host "正在获取 Drive ID..."
           try {
               $headers = @{ Authorization = "Bearer $token" }
-              $driveItem = Invoke-RestMethod -Uri $shareUrl -Headers $headers -Method GET
+              # 获取 /me/drive 信息
+              $driveInfo = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/me/drive" -Headers $headers -Method GET
               
-              $driveId = $driveItem.parentReference.driveId
-              $folderItemId = $driveItem.id
-              $folderName = $driveItem.name
+              $driveId = $driveInfo.id
+              # 硬编码文件夹名，因为你确认它已存在
+              $folderName = "PVE-Custom-ISO"
               
               Write-Host "✓ 驱动信息获取成功:"
               Write-Host "  - Drive ID: $driveId"
-              Write-Host "  - Folder Item ID: $folderItemId"
-              Write-Host "  - 文件夹名: $folderName"
+              Write-Host "  - 目标文件夹: $folderName"
               
               "driveId=$driveId" >> $env:GITHUB_OUTPUT
-              "folderItemId=$folderItemId" >> $env:GITHUB_OUTPUT
               "folderName=$folderName" >> $env:GITHUB_OUTPUT
               
           } catch {
@@ -108,7 +105,7 @@ jobs:
           }
 
       # =========================
-      # 下载文件（使用PowerShell，参考ESXi工作流）
+      # 下载文件 (已更新为 Refresh Token)
       # =========================
       - name: Download Files from OneDrive
         shell: pwsh
@@ -118,15 +115,14 @@ jobs:
           
           Write-Host "=== 下载文件 ==="
           
-          Write-Host "正在获取下载用的访问令牌..."
+          # 1. 获取 Token
           $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
           $body = @{
               client_id     = $env:OD_CLIENT_ID
-              scope         = "https://graph.microsoft.com/.default"
               client_secret = $env:OD_CLIENT_SECRET
-              grant_type    = "client_credentials"
+              refresh_token = $env:OD_REFRESH_TOKEN
+              grant_type    = "refresh_token"
           }
-          
           $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
           $token = ($tokenResponse.access_token).Trim()
           Write-Host "✓ 下载令牌获取成功"
@@ -145,6 +141,7 @@ jobs:
           $folderName = "${{ steps.get_drive_info.outputs.folderName }}"
           
           foreach ($file in $files) {
+              # 直接使用路径定位：/drives/{id}/root:/{folder}/{file}:/content
               $downloadUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${folderName}/${file}:/content"
               $outFile = Join-Path $downloadDir $file
               
@@ -166,6 +163,7 @@ jobs:
                   }
               } catch {
                   Write-Host "✗ $file - $($_.Exception.Message)"
+                  # 调试用：Write-Host $_.Exception.Response.StatusCode
               }
           }
           
@@ -418,7 +416,7 @@ jobs:
           echo "ISO_SIZE=$ISO_SIZE" >> $GITHUB_ENV
 
       # =========================
-      # 幂等上传到 OneDrive
+      # 幂等上传到 OneDrive (已更新为 Refresh Token)
       # =========================
       - name: Upload ISO with Idempotent Strategy
         shell: pwsh
@@ -427,12 +425,14 @@ jobs:
           $OutputEncoding = [System.Text.Encoding]::UTF8
           
           Write-Host "幂等上传策略开始..."
+          
+          # 1. 获取 Token
           $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
           $body = @{
               client_id     = $env:OD_CLIENT_ID
-              scope         = "https://graph.microsoft.com/.default"
               client_secret = $env:OD_CLIENT_SECRET
-              grant_type    = "client_credentials"
+              refresh_token = $env:OD_REFRESH_TOKEN
+              grant_type    = "refresh_token"
           }
           
           try {
@@ -444,10 +444,12 @@ jobs:
           $isoName = "${{ env.ISO_OUTPUT }}"
           
           $driveId = "${{ steps.get_drive_info.outputs.driveId }}"
-          $folderName = [System.Uri]::UnescapeDataString("${{ steps.get_drive_info.outputs.folderName }}")
+          $folderName = "${{ steps.get_drive_info.outputs.folderName }}"
           
           $encodedFolderName = [System.Uri]::EscapeDataString($folderName)
           $encodedIsoName = [System.Uri]::EscapeDataString($isoName)
+          
+          # 直接构造文件路径 URL
           $fileUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}"
           
           # 幂等删除
