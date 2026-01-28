@@ -2,12 +2,12 @@ name: Z-Account Auto KeepAlive
 
 on:
   schedule:
-    # 每天 UTC 0,6,12,18 点运行
+    # 每天 0点, 6点, 12点, 18点 触发
     - cron: '0 */6 * * *'
   workflow_dispatch: {}
 
 jobs:
-  run-cloud-script:
+  run-z-account:
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
@@ -30,16 +30,19 @@ jobs:
             echo ">>> Manual Trigger: Skipping delay."
             exit 0
           else
-            echo ">>> Schedule Trigger: Random sleeping..."
+            # 随机等待 0-60 分钟
             WAIT_SEC=$((RANDOM % 3600))
             echo "Sleeping for ${WAIT_SEC} seconds"
             sleep $WAIT_SEC
           fi
 
-      - name: Run Script
+      - name: Run Script for Account Z
         env:
-          Z_CLIENT_ID: ${{ secrets.Z_CLIENT_ID }}
-          Z_CLIENT_SECRET: ${{ secrets.Z_CLIENT_SECRET }}
-          Z_REFRESH_TOKEN: ${{ secrets.Z_REFRESH_TOKEN }}
-          Z_TENANT_ID: ${{ secrets.Z_TENANT_ID }}
+          # 【这里是修复的关键】
+          # 左边是脚本要的通用名 (CLIENT_ID)
+          # 右边是你仓库里存的私房钱 (secrets.Z_CLIENT_ID)
+          CLIENT_ID: ${{ secrets.Z_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.Z_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.Z_REFRESH_TOKEN }}
+          TENANT_ID: ${{ secrets.Z_TENANT_ID }}
         run: python main.py
