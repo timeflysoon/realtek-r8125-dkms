@@ -11,10 +11,6 @@ on:
         description: 'RTL8125 驱动文件名（在 OneDrive 中）'
         required: true
         default: 'realtek-r8125-dkms_9.012.04-1_amd64.deb'
-      pve_custom_iso_link:
-        description: 'OneDrive PVE-Custom-ISO 共享链接 (仅作占位，实际使用 PVE-Custom-ISO 文件夹)'
-        required: true
-        default: 'https://xs9888outlook-my.sharepoint.com/...'
 
 permissions:
   contents: write
@@ -24,7 +20,6 @@ env:
   OD_CLIENT_SECRET: ${{ secrets.OD_CLIENT_SECRET }}
   OD_TENANT_ID: ${{ secrets.OD_TENANT_ID }}
   OD_REFRESH_TOKEN: ${{ secrets.OD_REFRESH_TOKEN }}
-  # SHARED_LINK 已移除，逻辑改为直接操作 PVE-Custom-ISO 文件夹
 
 jobs:
   build:
@@ -141,11 +136,18 @@ jobs:
           $folderName = "${{ steps.get_drive_info.outputs.folderName }}"
           
           foreach ($file in $files) {
-              # 直接使用路径定位：/drives/{id}/root:/{folder}/{file}:/content
-              $downloadUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${folderName}/${file}:/content"
+              # URL 编码处理，防止空格或特殊字符导致 404
+              $encodedFolderName = [System.Uri]::EscapeDataString($folderName)
+              $encodedFileName = [System.Uri]::EscapeDataString($file)
+              
+              # 构建 URL
+              $downloadUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedFileName}:/content"
               $outFile = Join-Path $downloadDir $file
               
               Write-Host "下载: $file"
+              # 打印 URL 以便调试
+              Write-Host "DEBUG: URL -> $downloadUrl"
+              
               try {
                   Invoke-RestMethod -Method GET -Uri $downloadUrl -Headers $headers -OutFile $outFile
                   
@@ -163,7 +165,11 @@ jobs:
                   }
               } catch {
                   Write-Host "✗ $file - $($_.Exception.Message)"
-                  # 调试用：Write-Host $_.Exception.Response.StatusCode
+                  # 如果是 404，提示用户检查文件名
+                  if ($_.Exception.Response.StatusCode -eq 404) {
+                      Write-Host "⚠️  错误 404: OneDrive 中找不到文件 '$file'。"
+                      Write-Host "    请检查文件夹 'PVE-Custom-ISO' 中是否存在该文件，且文件名完全一致。"
+                  }
               }
           }
           
