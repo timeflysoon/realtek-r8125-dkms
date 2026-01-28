@@ -35,19 +35,12 @@ jobs:
       - name: Install dependencies
         run: |
           echo "=== 安装依赖包 ==="
-          # 【修复】移除不稳定的 Microsoft 仓库源，解决 403 Forbidden 报错
-          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
-          
           sudo apt-get update
-          # 关键修复：安装 isolinux 以获取 MBR 引导模板 (isohdpfx.bin)，否则 USB 无法启动
           sudo apt-get install -y xorriso curl file jq isolinux
           echo "✅ 依赖安装完成"
-          echo "  - xorriso: ISO 打包工具"
-          echo "  - isolinux: 提供 MBR 模板文件 (isohdpfx.bin)"
-          echo "  - curl/file/jq: 网络和文件处理工具"
 
       # =========================
-      # 获取 OneDrive 驱动和文件夹信息 (升级为 Refresh Token)
+      # 获取 OneDrive 驱动和文件夹信息 (Refresh Token 版)
       # =========================
       - name: Get OneDrive Drive and Folder Information
         id: get_drive_info
@@ -56,18 +49,18 @@ jobs:
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           $OutputEncoding = [System.Text.Encoding]::UTF8
           
-          Write-Host "=== 获取驱动和文件夹信息 ==="
+          Write-Host "=== 获取驱动和文件夹信息 (Refresh Token 模式) ==="
           
-          # 使用 Refresh Token 获取 Access Token
           $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
           $body = @{
               client_id     = $env:OD_CLIENT_ID
               client_secret = $env:OD_CLIENT_SECRET
               refresh_token = $env:OD_REFRESH_TOKEN
               grant_type    = "refresh_token"
+              scope         = "Files.ReadWrite.All offline_access"
           }
           
-          Write-Host "正在获取访问令牌..."
+          Write-Host "正在使用 Refresh Token 获取访问令牌..."
           try {
               $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
               $token = ($tokenResponse.access_token).Trim()
@@ -75,26 +68,23 @@ jobs:
               if ([string]::IsNullOrEmpty($token)) {
                   throw "获取到的访问令牌为空"
               }
-              Write-Host "✓ 访问令牌获取成功"
+              Write-Host "✓ 访问令牌获取成功 (委托权限)"
           } catch {
               Write-Error "获取访问令牌失败: $_"
               throw
           }
           
-          # 直接获取当前用户的 Drive ID
-          Write-Host "正在获取 Drive ID..."
+          Write-Host "正在获取当前用户的 Drive 信息..."
           try {
               $headers = @{ Authorization = "Bearer $token" }
-              # 获取 /me/drive 信息
               $driveInfo = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/me/drive" -Headers $headers -Method GET
               
               $driveId = $driveInfo.id
-              # 硬编码文件夹名
               $folderName = "PVE-Custom-ISO"
               
               Write-Host "✓ 驱动信息获取成功:"
               Write-Host "  - Drive ID: $driveId"
-              Write-Host "  - 文件夹名: $folderName"
+              Write-Host "  - 文件夹名: $folderName (根目录下)"
               
               "driveId=$driveId" >> $env:GITHUB_OUTPUT
               "folderName=$folderName" >> $env:GITHUB_OUTPUT
@@ -105,7 +95,7 @@ jobs:
           }
 
       # =========================
-      # 下载文件 (升级为 Refresh Token + 简化路径)
+      # 下载文件 (使用相同的 Refresh Token 流程)
       # =========================
       - name: Download Files from OneDrive
         shell: pwsh
@@ -113,7 +103,7 @@ jobs:
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           $OutputEncoding = [System.Text.Encoding]::UTF8
           
-          Write-Host "=== 下载文件 ==="
+          Write-Host "=== 下载文件 (使用委托权限令牌) ==="
           
           Write-Host "正在获取下载用的访问令牌..."
           $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
@@ -122,6 +112,7 @@ jobs:
               client_secret = $env:OD_CLIENT_SECRET
               refresh_token = $env:OD_REFRESH_TOKEN
               grant_type    = "refresh_token"
+              scope         = "Files.ReadWrite.All offline_access"
           }
           
           $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
@@ -142,12 +133,7 @@ jobs:
           $folderName = "${{ steps.get_drive_info.outputs.folderName }}"
           
           foreach ($file in $files) {
-              # URL编码处理，防止特殊字符报错
-              $encodedFolderName = [System.Uri]::EscapeDataString($folderName)
-              $encodedFileName = [System.Uri]::EscapeDataString($file)
-              
-              # 直接构造路径
-              $downloadUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedFileName}:/content"
+              $downloadUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${folderName}/${file}:/content"
               $outFile = Join-Path $downloadDir $file
               
               Write-Host "下载: $file"
@@ -168,9 +154,6 @@ jobs:
                   }
               } catch {
                   Write-Host "✗ $file - $($_.Exception.Message)"
-                  if ($_.Exception.Response.StatusCode -eq 404) {
-                      Write-Host "⚠️  错误 404: 找不到文件 '$file'。请检查 PVE-Custom-ISO 文件夹。"
-                  }
               }
           }
           
@@ -180,7 +163,6 @@ jobs:
           
           Write-Host "✓ 所有文件下载成功"
           
-          # 设置环境变量
           "ISO_ORIG=downloads/$proxmoxIso" >> $env:GITHUB_ENV
           "DRIVER_FILE=downloads/$driverFile" >> $env:GITHUB_ENV
 
@@ -205,25 +187,21 @@ jobs:
         run: |
           echo "=== 解析版本信息 ==="
           
-          # 从 ISO 文件名提取 PVE 版本
           ISO_BASENAME=$(basename "$ISO_ORIG")
           if [[ "$ISO_BASENAME" =~ proxmox-ve_([0-9]+\.[0-9]+(-[0-9]+)?)\.iso$ ]]; then
             PVE_VERSION="${BASH_REMATCH[1]}"
             echo "PVE_VERSION=$PVE_VERSION" >> $GITHUB_ENV
             echo "ISO_OUTPUT=PVE-${PVE_VERSION}-r8125.iso" >> $GITHUB_ENV
             
-            # 关键修复：使用 blkid 提取官方原版卷标，防止安装报错
             echo "正在提取原版 ISO 卷标..."
             ORIG_LABEL=$(blkid -o value -s LABEL "$ISO_ORIG")
             if [ -z "$ORIG_LABEL" ]; then
-                # 如果 blkid 无法提取，使用合理的默认值
                 ORIG_LABEL="PVE-${PVE_VERSION}"
                 echo "⚠️  blkid 无法提取卷标，使用默认值: $ORIG_LABEL"
             else
                 echo "✅ 成功提取原版卷标: $ORIG_LABEL"
             fi
             
-            # 确保卷标长度和字符集合规
             ISO_LABEL=$(echo "$ORIG_LABEL" | tr -cd '[:alnum:]_-' | cut -c1-32)
             echo "ISO_LABEL=$ISO_LABEL" >> $GITHUB_ENV
             
@@ -236,7 +214,6 @@ jobs:
             exit 1
           fi
           
-          # 从驱动文件名提取驱动版本
           DRIVER_BASENAME=$(basename "$DRIVER_FILE")
           if [[ "$DRIVER_BASENAME" =~ realtek-r8125-dkms_([^_]+)_amd64\.deb ]]; then
             DRIVER_VERSION="${BASH_REMATCH[1]}"
@@ -268,12 +245,10 @@ jobs:
               $releaseInfo = Invoke-RestMethod -Uri $releaseUrl -Headers $authHeader -ErrorAction Stop
               Write-Host "✅ 找到现有的 Release: $($releaseInfo.name)"
               
-              # 删除现有的 Release
               $deleteUrl = "https://api.github.com/repos/${{ github.repository }}/releases/$($releaseInfo.id)"
               Invoke-RestMethod -Uri $deleteUrl -Headers $authHeader -Method DELETE
               Write-Host "✅ 已删除现有的 Release"
               
-              # 删除现有的 Git Tag
               $tagUrl = "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/${releaseTag}"
               try {
                   Invoke-RestMethod -Uri $tagUrl -Headers $authHeader -Method DELETE
@@ -297,7 +272,6 @@ jobs:
         run: |
           echo "=== 构建自定义 ISO (支持USB混合引导与增强驱动集成) ==="
           
-          # 清理工作目录
           rm -rf work
           mkdir -p work/iso
           
@@ -306,7 +280,6 @@ jobs:
           chmod -R +w work/iso
           
           echo "2. 添加 RTL8125 驱动包..."
-          # 为确保路径兼容性，驱动将同时存放在多个备选位置
           mkdir -p work/iso/pool/extras
           cp "$DRIVER_FILE" work/iso/pool/extras/
           cp "$DRIVER_FILE" work/iso/
@@ -351,7 +324,6 @@ jobs:
           
           echo "4. 智能识别引导架构 (动态查找文件)..."
           
-          # 动态查找引导文件，不依赖硬编码路径
           FULL_ISOLINUX=$(find work/iso -name isolinux.bin 2>/dev/null | head -1)
           FULL_GRUB_BIOS=$(find work/iso -name eltorito.img 2>/dev/null | head -1)
           FULL_EFI=$(find work/iso -name efi.img 2>/dev/null | head -1)
@@ -361,16 +333,13 @@ jobs:
           echo "    - GRUB BIOS: $FULL_GRUB_BIOS"
           echo "    - EFI: $FULL_EFI"
           
-          # 基础打包命令
           XORRISO_CMD="xorriso -as mkisofs -r -V \"$ISO_LABEL\" -o \"$ISO_OUTPUT\" -J -joliet-long"
           
-          # --- Legacy BIOS 处理 ---
           if [ -n "$FULL_ISOLINUX" ]; then
             echo "✅ 检测到 Legacy ISOLINUX (旧版架构)"
             REL_ISOLINUX=${FULL_ISOLINUX#work/iso/}
             REL_CAT=$(dirname "$REL_ISOLINUX")/boot.cat
             
-            # 关键修复：查找系统 MBR 模板文件 (isohdpfx.bin) 用于 USB 混合引导
             HOST_MBR=$(find /usr -name isohdpfx.bin 2>/dev/null | head -1)
             if [ -z "$HOST_MBR" ]; then
                 HOST_MBR=$(find /usr/lib/ISOLINUX -name isohdpfx.bin 2>/dev/null | head -1)
@@ -394,20 +363,17 @@ jobs:
             exit 1
           fi
 
-          # --- UEFI 处理 ---
           if [ -n "$FULL_EFI" ]; then
             REL_EFI=${FULL_EFI#work/iso/}
             XORRISO_CMD="$XORRISO_CMD -eltorito-alt-boot -e $REL_EFI -no-emul-boot -isohybrid-gpt-basdat"
             echo "✅ 添加 UEFI 引导支持: $REL_EFI"
           fi
           
-          # 完成命令构建
           XORRISO_CMD="$XORRISO_CMD work/iso"
           
           echo "5. 执行打包命令..."
           eval "$XORRISO_CMD"
           
-          # 验证生成的 ISO
           if [ ! -f "$ISO_OUTPUT" ]; then
             echo "❌ ISO 打包失败"
             exit 1
@@ -416,14 +382,13 @@ jobs:
           ISO_SIZE=$(stat -c%s "$ISO_OUTPUT")
           echo "✅ ISO 构建完成: $((ISO_SIZE/1024/1024)) MB"
           
-          # 计算 SHA256
           sha256sum "$ISO_OUTPUT" > sha256.txt
           SHA256=$(cut -d' ' -f1 sha256.txt)
           echo "SHA256=$SHA256" >> $GITHUB_ENV
           echo "ISO_SIZE=$ISO_SIZE" >> $GITHUB_ENV
 
       # =========================
-      # 幂等上传到 OneDrive (升级为 Refresh Token)
+      # 幂等上传到 OneDrive (Refresh Token 版)
       # =========================
       - name: Upload ISO with Idempotent Strategy
         shell: pwsh
@@ -433,13 +398,13 @@ jobs:
           
           Write-Host "幂等上传策略开始..."
           
-          # 1. 获取 Token
           $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
           $body = @{
               client_id     = $env:OD_CLIENT_ID
               client_secret = $env:OD_CLIENT_SECRET
               refresh_token = $env:OD_REFRESH_TOKEN
               grant_type    = "refresh_token"
+              scope         = "Files.ReadWrite.All offline_access"
           }
           
           try {
@@ -455,20 +420,15 @@ jobs:
           
           $encodedFolderName = [System.Uri]::EscapeDataString($folderName)
           $encodedIsoName = [System.Uri]::EscapeDataString($isoName)
-          
-          # 直接构造文件路径 URL
           $fileUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}"
           
-          # 幂等删除
           try { Invoke-RestMethod -Uri $fileUrl -Headers @{ Authorization = "Bearer $uploadToken" } -Method DELETE } catch {}
           Start-Sleep -Seconds 2
           
-          # 创建上传会话
           $createUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}:/createUploadSession"
           $session = Invoke-RestMethod -Method POST -Uri $createUrl -Headers @{ Authorization = "Bearer $uploadToken"; "Content-Type" = "application/json" } -Body "{}"
           $uploadSessionUrl = $session.uploadUrl
           
-          # 分片上传
           $chunkSize = 3276800 * 10 
           $fileStream = [System.IO.File]::OpenRead($isoPath)
           $totalSize = $fileStream.Length
