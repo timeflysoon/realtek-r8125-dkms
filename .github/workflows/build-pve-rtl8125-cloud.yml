@@ -35,6 +35,10 @@ jobs:
       - name: Install dependencies
         run: |
           echo "=== 安装依赖包 ==="
+          # 【修复开始】移除不稳定的 Microsoft 仓库源，解决 403 Forbidden 报错
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+          # 【修复结束】
+          
           sudo apt-get update
           # 关键修复：安装 isolinux 以获取 MBR 引导模板 (isohdpfx.bin)，否则 USB 无法启动
           sudo apt-get install -y xorriso curl file jq isolinux
