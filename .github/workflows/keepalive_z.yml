@@ -1,24 +1,53 @@
-- name: 🎲 Random Delay & Probability
+name: Z-Account Auto KeepAlive
+
+on:
+  schedule:
+    # 每天 UTC 时间 0点, 6点, 12点, 18点 触发 (共4次)
+    # 配合下面的随机等待，活跃时间会散落在全天
+    - cron: '0 */6 * * *'
+  workflow_dispatch: # 手动触发开关
+
+jobs:
+  run-cloud-script:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120 # 防止意外卡死
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Requests
+        run: pip install requests
+
+      - name: Random Delay (Simulate Human)
         shell: bash
         run: |
-          # --- 逻辑分支 ---
+          # --- 智能等待逻辑 ---
           
-          # 情况 A: 手动触发 (测试/强行保活)
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo ">>> [Test Mode] 检测到手动触发 (Workflow Dispatch)。"
-            echo ">>> 跳过随机等待，立即执行脚本！"
-            # 直接退出当前 step，进入下一步运行 Python
+            # 如果是手动点击触发，不要等待，立即干活
+            echo ">>> 检测到手动触发 (Manual Mode)"
+            echo ">>> 跳过等待，立即执行..."
             exit 0
+          else
+            # 如果是定时任务，随机等待 0-60 分钟 (3600秒)
+            echo ">>> 检测到定时触发 (Schedule Mode)"
+            WAIT_SEC=$((RANDOM % 3600))
+            echo ">>> 模拟人类行为，将休眠 ${WAIT_SEC} 秒..."
+            sleep $WAIT_SEC
           fi
 
-          # 情况 B: 定时任务 (Schedule) - 只有这时才进行拟人化等待
-          echo ">>> [Auto Mode] 检测到定时触发。"
-          
-          # 1. 30% 概率“今天不上线” (可选，防止每天都跑太规律)
-          # 注意：为了让逻辑简单，这里我们只打印日志，真的跳过需要复杂的 job控制
-          # 这里仅做随机等待
-          
-          # 2. 生成随机等待时间 (0 - 3600秒)
-          WAIT_SEC=$((RANDOM % 3600))
-          echo ">>> 模拟人类行为，将挂机等待 ${WAIT_SEC} 秒..."
-          sleep $WAIT_SEC
+      - name: Run Script
+        env:
+          # 映射你设置好的 Secrets
+          Z_CLIENT_ID: ${{ secrets.Z_CLIENT_ID }}
+          Z_CLIENT_SECRET: ${{ secrets.Z_CLIENT_SECRET }}
+          Z_REFRESH_TOKEN: ${{ secrets.Z_REFRESH_TOKEN }}
+          # 租户ID虽然代码里没强制用，但映射进来备用
+          Z_TENANT_ID: ${{ secrets.Z_TENANT_ID }}
+        run: python main.py
