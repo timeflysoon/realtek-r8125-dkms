@@ -11,21 +11,18 @@ jobs:
         uses: actions/checkout@v4
 
       # ========================================================
-      # 1. 配置 SSH 环境 (Cloud Only 必须步骤)
+      # 1. 配置 SSH 环境 (用于推送到目标仓库 88alt)
       # ========================================================
       - name: Configure SSH
         env:
-          # 引用你的 Secret 私钥
           SSH_PRIVATE_KEY_88ALT: ${{ secrets.SSH_PRIVATE_KEY_88ALT }}
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           
-          # 写入私钥
           echo "$SSH_PRIVATE_KEY_88ALT" > ~/.ssh/id_rsa_88alt
           chmod 600 ~/.ssh/id_rsa_88alt
           
-          # 生成配置文件 (让 github-88alt 别名生效)
           cat <<EOF > ~/.ssh/config
           Host github-88alt
             HostName github.com
@@ -35,16 +32,20 @@ jobs:
           EOF
 
       # ========================================================
-      # 2. 执行同步脚本 (已修改为云端路径)
+      # 2. 执行同步脚本
       # ========================================================
       - name: Run Sync Script
         shell: bash
+        env:
+          # 【修改点1】引入 AUTH_PAT 变量
+          PAT: ${{ secrets.AUTH_PAT }}
         run: |
           set -e
 
           # --- 配置区域 ---
-          SOURCE_REPO="https://github.com/timeflysoon/realtek-r8125-dkms.git"
-          # 【修改点】云端直接使用当前目录下的相对路径
+          # 【修改点2】使用 AUTH_PAT 进行 https 认证，解决私有库克隆权限问题
+          SOURCE_REPO="https://$PAT@github.com/timeflysoon/realtek-r8125-dkms.git"
+          
           MIRROR_DIR="realtek-r8125-dkms.git" 
           TARGET_REPOS=(
               "git@github-88alt:88alt/realtek-r8125-dkms.git"
@@ -68,6 +69,9 @@ jobs:
           if ! git remote | grep -q "^origin$"; then
               echo "配置远程源 origin..."
               git remote add origin "$SOURCE_REPO"
+          else
+              # 如果 origin 已存在，更新 URL 以包含最新的 Token
+              git remote set-url origin "$SOURCE_REPO"
           fi
 
           # 3. 修改 fetch refspec - 只抓取分支和标签
@@ -104,7 +108,7 @@ jobs:
                   else
                       if [ $i -eq $MAX_RETRY ]; then
                           echo "✗ 推送失败（已达最大重试次数）"
-                          exit 1 # 在 Actions 里失败需要退出代码 1 以便标记为失败
+                          exit 1 
                       else
                           echo "推送失败，5秒后重试 ($i/$MAX_RETRY)..."
                           sleep 5
