@@ -310,60 +310,151 @@ jobs:
           echo "2. 添加 RTL8125 驱动包..."
           # 为确保路径兼容性，驱动将同时存放在多个备选位置
           mkdir -p work/iso/pool/extras
+          mkdir -p work/iso/pool/non-free
           cp "$DRIVER_FILE" work/iso/pool/extras/
+          cp "$DRIVER_FILE" work/iso/pool/non-free/
           cp "$DRIVER_FILE" work/iso/
           
-          echo ">>> 3. 配置 Preseed (Grok 逻辑修正版)"
+          echo ">>> 3. 配置 Preseed (增强安装逻辑)"
           PRESEED_FILE="work/iso/preseed.cfg"
           cat > "$PRESEED_FILE" << 'EOF'
-          # 兼容 d-i (旧版) 和 pve-installer (新版)
+          # PVE 9.x 自动安装配置 - 增强版 RTL8125 驱动集成
+          d-i partman/early_command string debconf-set partman-auto/disk "$(list-devices disk | head -1)"
+          
+          # 关键：late_command 在安装完成后执行
           d-i preseed/late_command string \
-            in-target sh -c ' \
-              if lspci -n | grep -q "10ec:8125"; then \
-                echo "Detected RTL8125 (10ec:8125), starting driver installation..."; \
-                mount /cdrom 2>/dev/null || true; \
-                FOUND_DEB=""; \
-                for dir in "/cdrom" "/cdrom/pool/extras" "/cdrom/pool/main/r/realtek-r8125-dkms"; do \
-                  if [ -d "$dir" ]; then \
-                    for deb in "$dir"/*r8125*.deb; do \
-                      if [ -f "$deb" ]; then FOUND_DEB="$deb"; break 2; fi; \
-                    done; \
+            # 挂载安装介质
+            sh -c 'mount /dev/sr0 /media/cdrom 2>/dev/null || mount /cdrom /media/cdrom 2>/dev/null || true; \
+            \
+            # 进入目标系统环境
+            in-target sh -c '\'' \
+              echo "开始安装后配置..." > /root/post-install.log; \
+              \
+              # 检查RTL8125网卡是否存在
+              if lspci -nn | grep -q "10ec:8125"; then \
+                echo "检测到 RTL8125 网卡 (10ec:8125)" >> /root/post-install.log; \
+                \
+                # 搜索驱动包 - 多个可能的位置
+                DRIVER_DEB=""; \
+                for SEARCH_PATH in /media/cdrom /media/cdrom/pool/extras /media/cdrom/pool/non-free /cdrom /cdrom/pool/extras /cdrom/pool/non-free; do \
+                  if [ -f "$SEARCH_PATH/"*r8125*.deb ]; then \
+                    DRIVER_DEB=$(ls "$SEARCH_PATH/"*r8125*.deb 2>/dev/null | head -1); \
+                    break; \
                   fi; \
                 done; \
-                if [ -n "$FOUND_DEB" ]; then \
-                  echo "Found package: $FOUND_DEB → installing..."; \
-                  dpkg --force-depends -i "$FOUND_DEB" || true; \
-                  CONF_FILE="/etc/modprobe.d/r8125-blacklist.conf"; \
-                  echo "blacklist r8169" > "$CONF_FILE"; \
-                  echo "install r8169 /bin/true" >> "$CONF_FILE"; \
-                  echo "Updating initramfs..."; \
-                  update-initramfs -u -k all || echo "WARNING: initramfs update failed"; \
-                  depmod -a; \
+                \
+                if [ -n "$DRIVER_DEB" ]; then \
+                  echo "找到驱动包: $DRIVER_DEB" >> /root/post-install.log; \
+                  \
+                  # 安装驱动包（强制安装，忽略依赖问题）
+                  dpkg --force-depends -i "$DRIVER_DEB" 2>&1 | tee -a /root/post-install.log; \
+                  \
+                  # 强制写入/etc/modules（确保启动时加载r8125）
+                  if ! grep -q "^r8125" /etc/modules 2>/dev/null; then \
+                    echo "r8125" >> /etc/modules; \
+                    echo "已将 r8125 添加到 /etc/modules" >> /root/post-install.log; \
+                  fi; \
+                  \
+                  # 创建更强的黑名单配置
+                  cat > /etc/modprobe.d/r8125-blacklist.conf << "EOL" \
+                  # 完全禁用原生 r8169 驱动，避免与 r8125 冲突 \
+                  blacklist r8169 \
+                  install r8169 /bin/true \
+                  # 别名也禁用 \
+                  alias pci:v000010ECd00008169sv*sd*bc*sc*i* r8125 \
+                  EOL \
+                  \
+                  echo "已创建黑名单配置" >> /root/post-install.log; \
+                  \
+                  # 检查内核头文件状态
+                  KERNEL_VERSION=$(uname -r); \
+                  HEADERS_PATH="/lib/modules/$KERNEL_VERSION/build"; \
+                  \
+                  if [ -d "$HEADERS_PATH" ] && [ -f "$HEADERS_PATH/Makefile" ]; then \
+                    echo "内核头文件存在，尝试编译驱动..." >> /root/post-install.log; \
+                    \
+                    # 强制重新构建DKMS模块
+                    if command -v dkms >/dev/null 2>&1; then \
+                      dkms remove r8125 -a 2>/dev/null || true; \
+                      dkms add r8125 2>/dev/null || true; \
+                      dkms build r8125 2>&1 | tee -a /root/post-install.log; \
+                      dkms install r8125 2>&1 | tee -a /root/post-install.log; \
+                    fi; \
+                  else \
+                    echo "警告：内核头文件不存在 ($HEADERS_PATH)" >> /root/post-install.log; \
+                    echo "驱动将在安装 pve-headers 后自动构建" >> /root/post-install.log; \
+                    echo "可以执行：apt update && apt install pve-headers" >> /root/post-install.log; \
+                  fi; \
+                  \
+                  # 更新initramfs（关键步骤！）
+                  echo "更新 initramfs..." >> /root/post-install.log; \
+                  update-initramfs -u -k all 2>&1 | tee -a /root/post-install.log; \
+                  \
+                  # 运行depmod
+                  depmod -a 2>&1 | tee -a /root/post-install.log; \
+                  \
+                  # 尝试立即加载驱动
                   modprobe -r r8169 2>/dev/null || true; \
-                  modprobe r8125 2>/dev/null && echo "r8125 loaded successfully." || echo "r8125 load deferred (reboot needed)."; \
+                  if modprobe r8125 2>/dev/null; then \
+                    echo "✅ RTL8125 驱动加载成功！" >> /root/post-install.log; \
+                    echo "网卡状态：" >> /root/post-install.log; \
+                    ip link show 2>/dev/null | grep -A2 "enp\|eth" >> /root/post-install.log; \
+                  else \
+                    echo "⚠️  驱动加载失败，可能需要重启" >> /root/post-install.log; \
+                    echo "请检查: dkms status" >> /root/post-install.log; \
+                  fi; \
+                  \
                 else \
-                  echo "ERROR: No *r8125*.deb found anywhere under /cdrom!"; \
+                  echo "错误：未找到驱动包！" >> /root/post-install.log; \
+                  echo "搜索路径: /media/cdrom /cdrom" >> /root/post-install.log; \
+                  ls -la /media/cdrom/* 2>/dev/null >> /root/post-install.log || true; \
                 fi; \
               else \
-                echo "RTL8125 not detected → skipping."; \
-              fi \
-            '
+                echo "未检测到 RTL8125 网卡，跳过驱动安装" >> /root/post-install.log; \
+              fi; \
+              \
+              echo "安装后配置完成" >> /root/post-install.log; \
+            '\'' \
+            \
+            # 卸载安装介质 \
+            umount /media/cdrom 2>/dev/null || true; \
+            echo "late_command 执行完成"'
           EOF
-          echo "✅ 自动安装配置已添加（含增强型路径搜索与 initramfs 刷新）"
           
           echo "4. 智能识别引导架构 (动态查找文件)..."
           
           # 动态查找引导文件，不依赖硬编码路径
           FULL_ISOLINUX=$(find work/iso -name isolinux.bin 2>/dev/null | head -1)
-          FULL_GRUB_BIOS=$(find work/iso -name eltorito.img 2>/dev/null | head -1)
+          FULL_ELTORITO=$(find work/iso -name eltorito.img 2>/dev/null | head -1)
           FULL_EFI=$(find work/iso -name efi.img 2>/dev/null | head -1)
           
           echo "  找到的文件:"
           echo "    - ISOLINUX: $FULL_ISOLINUX"
-          echo "    - GRUB BIOS: $FULL_GRUB_BIOS"
+          echo "    - ELTORITO: $FULL_ELTORITO"
           echo "    - EFI: $FULL_EFI"
           
-          # 基础打包命令
+          # 查找系统 MBR 模板文件 (isohdpfx.bin) 用于 USB 混合引导
+          HOST_MBR=$(find /usr -name isohdpfx.bin 2>/dev/null | head -1)
+          if [ -z "$HOST_MBR" ]; then
+              HOST_MBR=$(find /usr/lib/ISOLINUX -name isohdpfx.bin 2>/dev/null | head -1)
+          fi
+          if [ -z "$HOST_MBR" ]; then
+              HOST_MBR=$(find /usr/lib/syslinux -name isohdpfx.bin 2>/dev/null | head -1)
+          fi
+          
+          if [ -n "$HOST_MBR" ]; then
+              echo "✅ 找到 MBR 模板文件: $HOST_MBR"
+          else
+              echo "⚠️ 警告：未找到 MBR 模板文件 (isohdpfx.bin)，尝试生成备用方案"
+              # 从原始ISO提取MBR
+              dd if="$ISO_ORIG" of=work/isohdpfx.bin bs=1 count=432 2>/dev/null || true
+              if [ -f work/isohdpfx.bin ]; then
+                  HOST_MBR="work/isohdpfx.bin"
+                  echo "✅ 从原始ISO提取MBR成功"
+              fi
+          fi
+          
+          # 构建xorriso命令
           XORRISO_CMD="xorriso -as mkisofs -r -V \"$ISO_LABEL\" -o \"$ISO_OUTPUT\" -J -joliet-long"
           
           # --- Legacy BIOS 处理 ---
@@ -372,41 +463,46 @@ jobs:
             REL_ISOLINUX=${FULL_ISOLINUX#work/iso/}
             REL_CAT=$(dirname "$REL_ISOLINUX")/boot.cat
             
-            # 关键修复：查找系统 MBR 模板文件 (isohdpfx.bin) 用于 USB 混合引导
-            HOST_MBR=$(find /usr -name isohdpfx.bin 2>/dev/null | head -1)
-            if [ -z "$HOST_MBR" ]; then
-                HOST_MBR=$(find /usr/lib/ISOLINUX -name isohdpfx.bin 2>/dev/null | head -1)
+            XORRISO_CMD="$XORRISO_CMD -b $REL_ISOLINUX -c $REL_CAT -boot-load-size 4 -boot-info-table -no-emul-boot"
+            
+            # 添加isohybrid支持
+            if [ -n "$HOST_MBR" ]; then
+              XORRISO_CMD="$XORRISO_CMD -isohybrid-mbr $HOST_MBR"
+              echo "✅ 启用 isohybrid MBR 支持"
             fi
             
+          elif [ -n "$FULL_ELTORITO" ]; then
+            echo "✅ 检测到 El Torito (PVE 8/9)"
+            REL_ELTORITO=${FULL_ELTORITO#work/iso/}
+            XORRISO_CMD="$XORRISO_CMD -b $REL_ELTORITO -no-emul-boot -boot-load-size 4 -boot-info-table"
+            
             if [ -n "$HOST_MBR" ]; then
-                echo "✅ 找到 MBR 模板文件: $HOST_MBR"
-                XORRISO_CMD="$XORRISO_CMD -isohybrid-mbr $HOST_MBR -b $REL_ISOLINUX -c $REL_CAT -boot-load-size 4 -boot-info-table -no-emul-boot"
-            else
-                echo "⚠️ 警告：未找到 MBR 模板文件 (isohdpfx.bin)，USB 引导可能受限"
-                XORRISO_CMD="$XORRISO_CMD -b $REL_ISOLINUX -c $REL_CAT -boot-load-size 4 -boot-info-table -no-emul-boot"
+              XORRISO_CMD="$XORRISO_CMD -isohybrid-mbr $HOST_MBR"
+              echo "✅ 启用 isohybrid MBR 支持"
             fi
-          
-          elif [ -n "$FULL_GRUB_BIOS" ]; then
-            echo "✅ 检测到 Pure GRUB (新版架构 PVE 9+)"
-            REL_GRUB=${FULL_GRUB_BIOS#work/iso/}
-            XORRISO_CMD="$XORRISO_CMD -b $REL_GRUB -no-emul-boot -boot-load-size 4 -boot-info-table --grub2-boot-info"
-          
+            
           else
-            echo "❌ 致命错误：找不到 BIOS 引导文件"
-            exit 1
+            echo "⚠️ 警告：未找到传统BIOS引导文件，仅支持UEFI启动"
           fi
 
           # --- UEFI 处理 ---
           if [ -n "$FULL_EFI" ]; then
             REL_EFI=${FULL_EFI#work/iso/}
-            XORRISO_CMD="$XORRISO_CMD -eltorito-alt-boot -e $REL_EFI -no-emul-boot -isohybrid-gpt-basdat"
+            XORRISO_CMD="$XORRISO_CMD -eltorito-alt-boot -e $REL_EFI -no-emul-boot"
             echo "✅ 添加 UEFI 引导支持: $REL_EFI"
+            
+            # 添加isohybrid GPT支持
+            if [ -n "$HOST_MBR" ]; then
+              XORRISO_CMD="$XORRISO_CMD -isohybrid-gpt-basdat"
+              echo "✅ 启用 isohybrid GPT 支持"
+            fi
           fi
           
           # 完成命令构建
           XORRISO_CMD="$XORRISO_CMD work/iso"
           
           echo "5. 执行打包命令..."
+          echo "命令: $XORRISO_CMD"
           eval "$XORRISO_CMD"
           
           # 验证生成的 ISO
@@ -416,13 +512,23 @@ jobs:
           fi
           
           ISO_SIZE=$(stat -c%s "$ISO_OUTPUT")
-          echo "✅ ISO 构建完成: $((ISO_SIZE/1024/1024)) MB"
+          ISO_SIZE_MB=$((ISO_SIZE/1024/1024))
+          echo "✅ ISO 构建完成: $ISO_OUTPUT ($ISO_SIZE_MB MB)"
+          
+          # 验证ISO是否支持hybrid引导
+          echo "6. 验证ISO引导特性..."
+          if file "$ISO_OUTPUT" | grep -q "bootable"; then
+            echo "✅ ISO 可引导"
+          else
+            echo "⚠️  ISO 引导标志可能未设置"
+          fi
           
           # 计算 SHA256
           sha256sum "$ISO_OUTPUT" > sha256.txt
           SHA256=$(cut -d' ' -f1 sha256.txt)
           echo "SHA256=$SHA256" >> $GITHUB_ENV
           echo "ISO_SIZE=$ISO_SIZE" >> $GITHUB_ENV
+          echo "ISO_SIZE_MB=$ISO_SIZE_MB" >> $GITHUB_ENV
 
       # =========================
       # 幂等上传到 OneDrive (升级为 Refresh Token + Scope)
@@ -511,7 +617,38 @@ jobs:
           body: |
             - **PVE 版本**: ${{ env.PVE_VERSION }}
             - **RTL8125 驱动版本**: ${{ env.DRIVER_VERSION }}
+            - **文件大小**: ${{ env.ISO_SIZE_MB }} MB
             - **SHA256**: `${{ env.SHA256 }}`
+            
+            ## 🔧 增强功能
+            - ✅ 集成 RTL8125 2.5G 网卡驱动
+            - ✅ 自动禁用原生 r8169 驱动（防止冲突）
+            - ✅ 自动添加到 /etc/modules 确保启动加载
+            - ✅ 更新 initramfs 确保驱动在启动时可用
+            - ✅ 支持 USB 混合引导（ISO 直接写入U盘即可启动）
+            
+            ## 🚀 安装说明
+            1. 将 ISO 写入 U 盘：`dd if=PVE-${{ env.PVE_VERSION }}-r8125.iso of=/dev/sdX bs=4M`
+            2. 从 U 盘启动安装 PVE
+            3. 系统会自动检测 RTL8125 网卡并安装驱动
+            4. 安装完成后网卡即可正常使用
+            
+            ## ⚠️ 注意事项
+            - 如果安装后网卡仍未识别，请检查是否安装了 pve-headers
+            - 可执行 `dkms status` 查看驱动编译状态
+            - 需要重启系统以使驱动完全生效
+            
+            ## 📋 验证命令
+            ```bash
+            # 检查驱动是否加载
+            lsmod | grep r8125
+            
+            # 检查网卡状态
+            lspci -nn | grep -i realtek
+            
+            # 检查网络接口
+            ip link show
+            ```
           files: |
             ${{ env.ISO_OUTPUT }}
           draft: false
