@@ -125,7 +125,7 @@ jobs:
         echo "Conflicts: r8125-dkms" >> "$PKGDIR/DEBIAN/control"
         echo "Description: Realtek RTL8125 2.5G Ethernet DKMS driver" >> "$PKGDIR/DEBIAN/control"
         echo " DKMS driver for Realtek RTL8125 2.5G Ethernet cards." >> "$PKGDIR/DEBIAN/control"
-        echo " Supports kernel up to 6.12." >> "$PKGDIR/DEBIAN/control"
+        echo " Tested on Proxmox VE 8.x / 9.x with kernel 6.2+." >> "$PKGDIR/DEBIAN/control"  # 修改了这一行
         echo " Compatible with Proxmox VE 8.x / 9.x." >> "$PKGDIR/DEBIAN/control"
         echo " Built from Realtek official driver v$CUR_VERSION." >> "$PKGDIR/DEBIAN/control"
         echo " Source: ${{ env.MANUAL_BACKUP_URL }}" >> "$PKGDIR/DEBIAN/control"
@@ -306,7 +306,7 @@ jobs:
           - ✅ 自动禁用原生 r8169 驱动（防止冲突）
           - ✅ 多核编译优化 (-j$(nproc))
           - ✅ 自动更新 initramfs
-          - ✅ 兼容 PVE 8.x / 9.x (Kernel 6.2 - 6.12)
+          - ✅ 兼容 PVE 8.x / 9.x (Kernel 6.2+)  # 修改了这一行
           - ✅ 推荐安装 pve-headers 以自动编译驱动
           
           ## 📦 安装说明
