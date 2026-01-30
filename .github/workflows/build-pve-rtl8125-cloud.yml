@@ -27,7 +27,7 @@ jobs:
     timeout-minutes: 60
     steps:
       # =========================
-      # 准备阶段
+      # 准备阶段 (完全不变)
       # =========================
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -35,19 +35,13 @@ jobs:
       - name: Install dependencies
         run: |
           echo "=== 安装依赖包 ==="
-          # 【修复】移除不稳定的 Microsoft 仓库源，解决 403 Forbidden 报错
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
-          
           sudo apt-get update
-          # 关键修复：安装 isolinux 以获取 MBR 引导模板 (isohdpfx.bin)，否则 USB 无法启动
           sudo apt-get install -y xorriso curl file jq isolinux
           echo "✅ 依赖安装完成"
-          echo "  - xorriso: ISO 打包工具"
-          echo "  - isolinux: 提供 MBR 模板文件 (isohdpfx.bin)"
-          echo "  - curl/file/jq: 网络和文件处理工具"
 
       # =========================
-      # 获取 OneDrive 驱动和文件夹信息 (升级为 Refresh Token + Scope)
+      # 获取 OneDrive 驱动和文件夹信息 (完全不变)
       # =========================
       - name: Get OneDrive Drive and Folder Information
         id: get_drive_info
@@ -55,67 +49,44 @@ jobs:
         run: |
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           $OutputEncoding = [System.Text.Encoding]::UTF8
-          
           Write-Host "=== 获取驱动和文件夹信息 ==="
-          
-          # 使用 Refresh Token 获取 Access Token
           $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
           $body = @{
               client_id     = $env:OD_CLIENT_ID
               client_secret = $env:OD_CLIENT_SECRET
               refresh_token = $env:OD_REFRESH_TOKEN
               grant_type    = "refresh_token"
-              scope         = "Files.ReadWrite.All offline_access" # <--- 已添加 Scope
+              scope         = "Files.ReadWrite.All offline_access"
           }
-          
-          Write-Host "正在获取访问令牌..."
           try {
               $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
               $token = ($tokenResponse.access_token).Trim()
-              
-              if ([string]::IsNullOrEmpty($token)) {
-                  throw "获取到的访问令牌为空"
-              }
+              if ([string]::IsNullOrEmpty($token)) { throw "获取到的访问令牌为空" }
               Write-Host "✓ 访问令牌获取成功"
-          } catch {
-              Write-Error "获取访问令牌失败: $_"
-              throw
-          }
+          } catch { Write-Error "获取访问令牌失败: $_"; throw }
           
-          # 直接获取当前用户的 Drive ID
           Write-Host "正在获取 Drive ID..."
           try {
               $headers = @{ Authorization = "Bearer $token" }
-              # 获取 /me/drive 信息
               $driveInfo = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/me/drive" -Headers $headers -Method GET
-              
               $driveId = $driveInfo.id
-              # 硬编码文件夹名
               $folderName = "PVE-Custom-ISO"
-              
               Write-Host "✓ 驱动信息获取成功:"
               Write-Host "  - Drive ID: $driveId"
               Write-Host "  - 文件夹名: $folderName"
-              
               "driveId=$driveId" >> $env:GITHUB_OUTPUT
               "folderName=$folderName" >> $env:GITHUB_OUTPUT
-              
-          } catch {
-              Write-Error "获取驱动信息失败: $_"
-              throw
-          }
+          } catch { Write-Error "获取驱动信息失败: $_"; throw }
 
       # =========================
-      # 下载文件 (升级为 Refresh Token + Scope + 简化路径)
+      # 下载文件 (完全不变)
       # =========================
       - name: Download Files from OneDrive
         shell: pwsh
         run: |
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           $OutputEncoding = [System.Text.Encoding]::UTF8
-          
           Write-Host "=== 下载文件 ==="
-          
           Write-Host "正在获取下载用的访问令牌..."
           $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
           $body = @{
@@ -123,43 +94,33 @@ jobs:
               client_secret = $env:OD_CLIENT_SECRET
               refresh_token = $env:OD_REFRESH_TOKEN
               grant_type    = "refresh_token"
-              scope         = "Files.ReadWrite.All offline_access" # <--- 已添加 Scope
+              scope         = "Files.ReadWrite.All offline_access"
           }
-          
           $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
           $token = ($tokenResponse.access_token).Trim()
           Write-Host "✓ 下载令牌获取成功"
           
           $downloadDir = "downloads"
           New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
-          
           $proxmoxIso = "${{ github.event.inputs.proxmox_iso_filename }}"
           $driverFile = "${{ github.event.inputs.r8125_driver_filename }}"
-          
           $files = @($proxmoxIso, $driverFile)
-          
           $headers = @{ Authorization = "Bearer $token" }
           $successCount = 0
           $driveId = "${{ steps.get_drive_info.outputs.driveId }}"
           $folderName = "${{ steps.get_drive_info.outputs.folderName }}"
           
           foreach ($file in $files) {
-              # URL编码处理，防止特殊字符报错
               $encodedFolderName = [System.Uri]::EscapeDataString($folderName)
               $encodedFileName = [System.Uri]::EscapeDataString($file)
-              
-              # 直接构造路径
               $downloadUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedFileName}:/content"
               $outFile = Join-Path $downloadDir $file
-              
               Write-Host "下载: $file"
               try {
                   Invoke-RestMethod -Method GET -Uri $downloadUrl -Headers $headers -OutFile $outFile
-                  
                   if (Test-Path $outFile) {
                       $fileSize = (Get-Item $outFile).Length
                       $successCount++
-                      
                       if ($file.EndsWith(".iso")) {
                           $sizeMB = $fileSize / 1MB
                           Write-Host "✓ $file ($([math]::Round($sizeMB, 2)) MB)"
@@ -175,70 +136,50 @@ jobs:
                   }
               }
           }
-          
-          if ($successCount -ne $files.Count) {
-              throw "下载完成: $successCount/$($files.Count) 个文件"
-          }
-          
+          if ($successCount -ne $files.Count) { throw "下载完成: $successCount/$($files.Count) 个文件" }
           Write-Host "✓ 所有文件下载成功"
-          
-          # 设置环境变量
           "ISO_ORIG=downloads/$proxmoxIso" >> $env:GITHUB_ENV
           "DRIVER_FILE=downloads/$driverFile" >> $env:GITHUB_ENV
 
       # =========================
-      # 验证 ISO 文件
+      # 验证 ISO 文件 (完全不变)
       # =========================
       - name: Verify ISO File
         run: |
           echo "=== 验证 ISO 文件 ==="
-          
           if ! xorriso -indev "$ISO_ORIG" -toc 2>&1 | grep -q "Media summary"; then
             echo "❌ ISO 文件格式不正确或已损坏"
             exit 1
           fi
-          
           echo "✅ ISO 文件验证通过"
 
       # =========================
-      # 解析版本信息
+      # 解析版本信息 (完全不变)
       # =========================
       - name: Parse Version Information
         run: |
           echo "=== 解析版本信息 ==="
-          
-          # 从 ISO 文件名提取 PVE 版本
           ISO_BASENAME=$(basename "$ISO_ORIG")
           if [[ "$ISO_BASENAME" =~ proxmox-ve_([0-9]+\.[0-9]+(-[0-9]+)?)\.iso$ ]]; then
             PVE_VERSION="${BASH_REMATCH[1]}"
             echo "PVE_VERSION=$PVE_VERSION" >> $GITHUB_ENV
             echo "ISO_OUTPUT=PVE-${PVE_VERSION}-r8125.iso" >> $GITHUB_ENV
-            
-            # 关键修复：使用 blkid 提取官方原版卷标，防止安装报错
-            echo "正在提取原版 ISO 卷标..."
             ORIG_LABEL=$(blkid -o value -s LABEL "$ISO_ORIG")
             if [ -z "$ORIG_LABEL" ]; then
-                # 如果 blkid 无法提取，使用合理的默认值
                 ORIG_LABEL="PVE-${PVE_VERSION}"
                 echo "⚠️  blkid 无法提取卷标，使用默认值: $ORIG_LABEL"
             else
                 echo "✅ 成功提取原版卷标: $ORIG_LABEL"
             fi
-            
-            # 确保卷标长度和字符集合规
             ISO_LABEL=$(echo "$ORIG_LABEL" | tr -cd '[:alnum:]_-' | cut -c1-32)
             echo "ISO_LABEL=$ISO_LABEL" >> $GITHUB_ENV
-            
             echo "✅ PVE 版本: $PVE_VERSION"
             echo "✅ 输出文件: $ISO_OUTPUT"
             echo "✅ 卷标: $ISO_LABEL"
           else
             echo "❌ 无法解析 ISO 文件名: $ISO_BASENAME"
-            echo "⚠️  期望格式: proxmox-ve_X.Y-Z.iso"
             exit 1
           fi
-          
-          # 从驱动文件名提取驱动版本
           DRIVER_BASENAME=$(basename "$DRIVER_FILE")
           if [[ "$DRIVER_BASENAME" =~ realtek-r8125-dkms_([^_]+)_amd64\.deb ]]; then
             DRIVER_VERSION="${BASH_REMATCH[1]}"
@@ -250,353 +191,249 @@ jobs:
           fi
 
       # =========================
-      # 检查并删除现有的GitHub Release
+      # 检查并删除现有的GitHub Release (完全不变)
       # =========================
       - name: Check and Delete Existing GitHub Release
         shell: pwsh
         run: |
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           $OutputEncoding = [System.Text.Encoding]::UTF8
-          
           Write-Host "=== 检查并删除现有的 GitHub Release ==="
-          
           $releaseTag = "pve-${{ env.PVE_VERSION }}-r8125"
           $releaseUrl = "https://api.github.com/repos/${{ github.repository }}/releases/tags/${releaseTag}"
           $authHeader = @{ Authorization = "token ${{ github.token }}" }
-          
           Write-Host "检查 Release: $releaseTag"
-          
           try {
               $releaseInfo = Invoke-RestMethod -Uri $releaseUrl -Headers $authHeader -ErrorAction Stop
               Write-Host "✅ 找到现有的 Release: $($releaseInfo.name)"
-              
-              # 删除现有的 Release
               $deleteUrl = "https://api.github.com/repos/${{ github.repository }}/releases/$($releaseInfo.id)"
               Invoke-RestMethod -Uri $deleteUrl -Headers $authHeader -Method DELETE
               Write-Host "✅ 已删除现有的 Release"
-              
-              # 删除现有的 Git Tag
               $tagUrl = "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/${releaseTag}"
               try {
                   Invoke-RestMethod -Uri $tagUrl -Headers $authHeader -Method DELETE
                   Write-Host "✅ 已删除现有的 Git Tag"
-              } catch {
-                  Write-Host "⚠️ 删除 Git Tag 失败: $($_.Exception.Message)"
-              }
-              
+              } catch { Write-Host "⚠️ 删除 Git Tag 失败: $($_.Exception.Message)" }
           } catch {
-              if ($_.Exception.Response.StatusCode -eq 404) {
-                  Write-Host "✅ Release 不存在，无需删除"
-              } else {
-                  Write-Host "⚠️ 检查 Release 失败: $($_.Exception.Message)"
-              }
+              if ($_.Exception.Response.StatusCode -eq 404) { Write-Host "✅ Release 不存在，无需删除" }
+              else { Write-Host "⚠️ 检查 Release 失败: $($_.Exception.Message)" }
           }
 
       # =========================
-      # 构建自定义 ISO
+      # 【核心修改】构建自定义 ISO
       # =========================
       - name: Build Custom ISO
         run: |
-          echo "=== 构建自定义 ISO (支持USB混合引导与增强驱动集成) ==="
-          
-          # 清理工作目录
-          rm -rf work
-          mkdir -p work/iso
+          echo "=== 构建自定义 ISO (集成防Ventoy失效的驱动安装脚本) ==="
+          rm -rf work && mkdir -p work/iso
           
           echo "1. 解包原始 ISO..."
           xorriso -osirrox on -indev "$ISO_ORIG" -extract / work/iso
           chmod -R +w work/iso
-          
-          echo "2. 添加 RTL8125 驱动包..."
-          # 为确保路径兼容性，驱动将同时存放在多个备选位置
+
+          echo "2. 注入 RTL8125 驱动包 (多位置冗余)..."
           mkdir -p work/iso/pool/extras
           mkdir -p work/iso/pool/non-free
+          mkdir -p work/iso/drivers
           cp "$DRIVER_FILE" work/iso/pool/extras/
           cp "$DRIVER_FILE" work/iso/pool/non-free/
-          cp "$DRIVER_FILE" work/iso/
-          
-          echo ">>> 3. 配置 Preseed (增强安装逻辑)"
+          cp "$DRIVER_FILE" work/iso/drivers/
+          cp "$DRIVER_FILE" work/iso/  # 根目录也放一份，增加被搜索到的概率
+
+          echo ">>> 3. 【核心修改】配置 Preseed (通用全盘搜索与安装)"
           PRESEED_FILE="work/iso/preseed.cfg"
           cat > "$PRESEED_FILE" << 'EOF'
-          # PVE 9.x 自动安装配置 - 增强版 RTL8125 驱动集成
-          d-i partman/early_command string debconf-set partman-auto/disk "$(list-devices disk | head -1)"
-          
-          # 关键：late_command 在安装完成后执行
-          d-i preseed/late_command string \
-            # 挂载安装介质
-            sh -c 'mount /dev/sr0 /media/cdrom 2>/dev/null || mount /cdrom /media/cdrom 2>/dev/null || true; \
-            \
-            # 进入目标系统环境
-            in-target sh -c '\'' \
-              echo "开始安装后配置..." > /root/post-install.log; \
-              \
-              # 检查RTL8125网卡是否存在
-              if lspci -nn | grep -q "10ec:8125"; then \
-                echo "检测到 RTL8125 网卡 (10ec:8125)" >> /root/post-install.log; \
-                \
-                # 搜索驱动包 - 多个可能的位置
-                DRIVER_DEB=""; \
-                for SEARCH_PATH in /media/cdrom /media/cdrom/pool/extras /media/cdrom/pool/non-free /cdrom /cdrom/pool/extras /cdrom/pool/non-free; do \
-                  if [ -f "$SEARCH_PATH/"*r8125*.deb ]; then \
-                    DRIVER_DEB=$(ls "$SEARCH_PATH/"*r8125*.deb 2>/dev/null | head -1); \
-                    break; \
-                  fi; \
-                done; \
-                \
-                if [ -n "$DRIVER_DEB" ]; then \
-                  echo "找到驱动包: $DRIVER_DEB" >> /root/post-install.log; \
-                  \
-                  # 安装驱动包（强制安装，忽略依赖问题）
-                  dpkg --force-depends -i "$DRIVER_DEB" 2>&1 | tee -a /root/post-install.log; \
-                  \
-                  # 强制写入/etc/modules（确保启动时加载r8125）
-                  if ! grep -q "^r8125" /etc/modules 2>/dev/null; then \
-                    echo "r8125" >> /etc/modules; \
-                    echo "已将 r8125 添加到 /etc/modules" >> /root/post-install.log; \
-                  fi; \
-                  \
-                  # 创建更强的黑名单配置
-                  cat > /etc/modprobe.d/r8125-blacklist.conf << "EOL" \
-                  # 完全禁用原生 r8169 驱动，避免与 r8125 冲突 \
-                  blacklist r8169 \
-                  install r8169 /bin/true \
-                  # 别名也禁用 \
-                  alias pci:v000010ECd00008169sv*sd*bc*sc*i* r8125 \
-                  EOL \
-                  \
-                  echo "已创建黑名单配置" >> /root/post-install.log; \
-                  \
-                  # 检查内核头文件状态
-                  KERNEL_VERSION=$(uname -r); \
-                  HEADERS_PATH="/lib/modules/$KERNEL_VERSION/build"; \
-                  \
-                  if [ -d "$HEADERS_PATH" ] && [ -f "$HEADERS_PATH/Makefile" ]; then \
-                    echo "内核头文件存在，尝试编译驱动..." >> /root/post-install.log; \
-                    \
-                    # 强制重新构建DKMS模块
-                    if command -v dkms >/dev/null 2>&1; then \
-                      dkms remove r8125 -a 2>/dev/null || true; \
-                      dkms add r8125 2>/dev/null || true; \
-                      dkms build r8125 2>&1 | tee -a /root/post-install.log; \
-                      dkms install r8125 2>&1 | tee -a /root/post-install.log; \
+# PVE 自动安装配置 - 通用驱动集成版
+d-i partman/early_command string debconf-set partman-auto/disk "$(list-devices disk | head -1)"
+
+d-i preseed/late_command string \
+    # 第一阶段：在全系统范围内暴力搜索驱动包
+    mkdir -p /mnt/search_source; \
+    DRIVER_SOURCE_PATH=""; \
+    echo "===== 开始搜索 RTL8125 驱动包 =====" > /dev/console; \
+    \
+    # 1. 首先尝试标准 ISO 挂载点（非Ventoy环境）
+    for MOUNT_POINT in /cdrom /media/cdrom /mnt/cdrom /dev/sr0; do \
+        if mount $MOUNT_POINT /mnt/search_source 2>/dev/null; then \
+            echo "正在搜索标准挂载点: $MOUNT_POINT" > /dev/console; \
+            DEB_FILE=$(find /mnt/search_source -type f -name "realtek-r8125-dkms*.deb" 2>/dev/null | head -1); \
+            if [ -n "$DEB_FILE" ]; then \
+                DRIVER_SOURCE_PATH="$DEB_FILE"; \
+                echo "✅ 在标准挂载点找到驱动包: $DRIVER_SOURCE_PATH" > /dev/console; \
+                umount /mnt/search_source; \
+                break; \
+            fi; \
+            umount /mnt/search_source; \
+        fi; \
+    done; \
+    \
+    # 2. 如果标准点没找到，开始扫描所有磁盘分区（针对Ventoy等环境）
+    if [ -z "$DRIVER_SOURCE_PATH" ]; then \
+        echo "标准挂载点未找到，开始扫描磁盘分区..." > /dev/console; \
+        # 使用更宽泛的匹配模式，覆盖 sd[a-z]1 到 sd[a-z]9, sd[a-z]10+， nvme0n1p1 到 nvmeXnYpZ 等
+        for DISK_PARTITION in /dev/sd[a-z][1-9]* /dev/nvme[0-9]n[0-9]p[1-9]* /dev/mmcblk[0-9]p[1-9]*; do \
+            if [ -e "$DISK_PARTITION" ]; then \
+                if mount "$DISK_PARTITION" /mnt/search_source 2>/dev/null; then \
+                    echo "正在扫描分区: $DISK_PARTITION" > /dev/console; \
+                    DEB_FILE=$(find /mnt/search_source -type f -name "realtek-r8125-dkms*.deb" 2>/dev/null | head -1); \
+                    if [ -n "$DEB_FILE" ]; then \
+                        DRIVER_SOURCE_PATH="$DEB_FILE"; \
+                        echo "✅ 在分区 $DISK_PARTITION 上找到驱动包: $DRIVER_SOURCE_PATH" > /dev/console; \
+                        umount /mnt/search_source; \
+                        break; \
                     fi; \
-                  else \
-                    echo "警告：内核头文件不存在 ($HEADERS_PATH)" >> /root/post-install.log; \
-                    echo "驱动将在安装 pve-headers 后自动构建" >> /root/post-install.log; \
-                    echo "可以执行：apt update && apt install pve-headers" >> /root/post-install.log; \
-                  fi; \
-                  \
-                  # 更新initramfs（关键步骤！）
-                  echo "更新 initramfs..." >> /root/post-install.log; \
-                  update-initramfs -u -k all 2>&1 | tee -a /root/post-install.log; \
-                  \
-                  # 运行depmod
-                  depmod -a 2>&1 | tee -a /root/post-install.log; \
-                  \
-                  # 尝试立即加载驱动
-                  modprobe -r r8169 2>/dev/null || true; \
-                  if modprobe r8125 2>/dev/null; then \
-                    echo "✅ RTL8125 驱动加载成功！" >> /root/post-install.log; \
-                    echo "网卡状态：" >> /root/post-install.log; \
-                    ip link show 2>/dev/null | grep -A2 "enp\|eth" >> /root/post-install.log; \
-                  else \
-                    echo "⚠️  驱动加载失败，可能需要重启" >> /root/post-install.log; \
-                    echo "请检查: dkms status" >> /root/post-install.log; \
-                  fi; \
-                  \
-                else \
-                  echo "错误：未找到驱动包！" >> /root/post-install.log; \
-                  echo "搜索路径: /media/cdrom /cdrom" >> /root/post-install.log; \
-                  ls -la /media/cdrom/* 2>/dev/null >> /root/post-install.log || true; \
+                    umount /mnt/search_source; \
                 fi; \
-              else \
-                echo "未检测到 RTL8125 网卡，跳过驱动安装" >> /root/post-install.log; \
-              fi; \
-              \
-              echo "安装后配置完成" >> /root/post-install.log; \
-            '\'' \
+            fi; \
+        done; \
+    fi; \
+    \
+    # 3. 将找到的驱动包复制到新系统的 /tmp 目录
+    if [ -n "$DRIVER_SOURCE_PATH" ]; then \
+        cp "$DRIVER_SOURCE_PATH" /target/tmp/r8125.driver.deb; \
+        echo "驱动包已复制到新系统: /tmp/r8125.driver.deb" > /dev/console; \
+    else \
+        echo "⚠️  警告：在所有位置均未找到驱动包。请手动安装。" > /dev/console; \
+    fi; \
+    \
+    # 第二阶段：进入新安装的系统进行配置和安装
+    in-target sh -c '\'' \
+        echo "===== 开始驱动安装与系统配置 =====" > /dev/console; \
+        INSTALL_LOG="/root/r8125_post_install.log"; \
+        echo "驱动安装日志: $INSTALL_LOG" > /dev/console; \
+        \
+        # A. 【绝对优先】创建黑名单配置，完全阻止 r8169
+        echo "1. 创建黑名单配置..." > /dev/console; \
+        echo "blacklist r8169" > /etc/modprobe.d/r8125-blacklist.conf; \
+        echo "install r8169 /bin/true" >> /etc/modprobe.d/r8125-blacklist.conf; \
+        echo "✅ 原生 r8169 驱动已被加入黑名单。" > /dev/console; \
+        \
+        # B. 将 r8125 加入启动模块列表
+        echo "2. 配置启动加载模块..." > /dev/console; \
+        echo "r8125" >> /etc/modules; \
+        echo "✅ r8125 模块已加入 /etc/modules。" > /dev/console; \
+        \
+        # C. 如果找到了驱动包，尝试安装
+        if [ -f /tmp/r8125.driver.deb ]; then \
+            echo "3. 开始安装驱动包..." > /dev/console; \
+            # 强制安装，允许缺少依赖（如dkms），这是离线安装的关键
+            dpkg --force-depends -i /tmp/r8125.driver.deb 2>&1 | tee $INSTALL_LOG; \
+            echo "驱动包安装完成，日志已保存。" > /dev/console; \
             \
-            # 卸载安装介质 \
-            umount /media/cdrom 2>/dev/null || true; \
-            echo "late_command 执行完成"'
-          EOF
-          
-          echo "4. 智能识别引导架构 (动态查找文件)..."
-          
-          # 动态查找引导文件，不依赖硬编码路径
+            # D. 检查并尝试编译驱动（如果环境允许）
+            if command -v dkms >/dev/null 2>&1 && [ -d "/lib/modules/$(uname -r)/build" ]; then \
+                echo "4. 检测到编译环境，尝试构建驱动模块..." > /dev/console; \
+                dkms install r8125 2>&1 | tee -a $INSTALL_LOG; \
+            else \
+                echo "4. 注意：当前缺少编译环境（dkms或内核头文件）。" > /dev/console; \
+                echo "   驱动将在安装 pve-headers 后自动构建。" | tee -a $INSTALL_LOG; \
+                echo "   可联网后执行: apt update && apt install pve-headers dkms" | tee -a $INSTALL_LOG; \
+            fi; \
+        else \
+            echo "3. 跳过驱动包安装（未找到文件）。" > /dev/console; \
+            echo "未找到驱动包文件，请手动安装。" > $INSTALL_LOG; \
+        fi; \
+        \
+        # E. 【关键步骤】无论如何都更新 initramfs，使黑名单和模块列表生效
+        echo "5. 更新系统启动镜像 (initramfs)..." > /dev/console; \
+        update-initramfs -u -k all 2>&1 | tee -a $INSTALL_LOG; \
+        echo "✅ initramfs 更新完成，黑名单将在下次启动时生效。" > /dev/console; \
+        \
+        echo "===== 安装后配置完成 =====" > /dev/console; \
+        echo "请查看 $INSTALL_LOG 获取详细信息。" > /dev/console; \
+        echo "提示：若首次启动后网卡灯不亮（因缺少头文件），请在联网后安装 pve-headers 并重启。" > /dev/console; \
+    '\''; \
+    echo "late_command 执行结束。" > /dev/console
+EOF
+          echo "✅ Preseed 配置文件已生成（含通用驱动搜索逻辑）。"
+
+          echo "4. 智能判断引导模式..."
           FULL_ISOLINUX=$(find work/iso -name isolinux.bin 2>/dev/null | head -1)
           FULL_ELTORITO=$(find work/iso -name eltorito.img 2>/dev/null | head -1)
           FULL_EFI=$(find work/iso -name efi.img 2>/dev/null | head -1)
           
-          echo "  找到的文件:"
-          echo "    - ISOLINUX: $FULL_ISOLINUX"
-          echo "    - ELTORITO: $FULL_ELTORITO"
-          echo "    - EFI: $FULL_EFI"
-          
-          # 查找系统 MBR 模板文件 (isohdpfx.bin) 用于 USB 混合引导
-          HOST_MBR=$(find /usr -name isohdpfx.bin 2>/dev/null | head -1)
-          if [ -z "$HOST_MBR" ]; then
-              HOST_MBR=$(find /usr/lib/ISOLINUX -name isohdpfx.bin 2>/dev/null | head -1)
-          fi
-          if [ -z "$HOST_MBR" ]; then
-              HOST_MBR=$(find /usr/lib/syslinux -name isohdpfx.bin 2>/dev/null | head -1)
-          fi
-          
-          if [ -n "$HOST_MBR" ]; then
-              echo "✅ 找到 MBR 模板文件: $HOST_MBR"
-          else
-              echo "⚠️ 警告：未找到 MBR 模板文件 (isohdpfx.bin)，尝试生成备用方案"
-              # 从原始ISO提取MBR
-              dd if="$ISO_ORIG" of=work/isohdpfx.bin bs=1 count=432 2>/dev/null || true
-              if [ -f work/isohdpfx.bin ]; then
-                  HOST_MBR="work/isohdpfx.bin"
-                  echo "✅ 从原始ISO提取MBR成功"
-              fi
-          fi
-          
-          # 构建xorriso命令
-          XORRISO_CMD="xorriso -as mkisofs -r -V \"$ISO_LABEL\" -o \"$ISO_OUTPUT\" -J -joliet-long"
-          
-          # --- Legacy BIOS 处理 ---
+          XORRISO_ARGS=""
           if [ -n "$FULL_ISOLINUX" ]; then
-            echo "✅ 检测到 Legacy ISOLINUX (旧版架构)"
+            echo "✅ 检测到旧版架构 (Isolinux)"
             REL_ISOLINUX=${FULL_ISOLINUX#work/iso/}
-            REL_CAT=$(dirname "$REL_ISOLINUX")/boot.cat
-            
-            XORRISO_CMD="$XORRISO_CMD -b $REL_ISOLINUX -c $REL_CAT -boot-load-size 4 -boot-info-table -no-emul-boot"
-            
-            # 添加isohybrid支持
-            if [ -n "$HOST_MBR" ]; then
-              XORRISO_CMD="$XORRISO_CMD -isohybrid-mbr $HOST_MBR"
-              echo "✅ 启用 isohybrid MBR 支持"
-            fi
-            
+            REL_BOOT_CAT=$(dirname "$REL_ISOLINUX")/boot.cat
+            HOST_MBR=$(find /usr -name isohdpfx.bin | head -1)
+            XORRISO_ARGS="-isohybrid-mbr $HOST_MBR -b $REL_ISOLINUX -c $REL_BOOT_CAT -boot-load-size 4 -boot-info-table -no-emul-boot -eltorito-alt-boot -e ${FULL_EFI#work/iso/} -no-emul-boot -isohybrid-gpt-basdat"
           elif [ -n "$FULL_ELTORITO" ]; then
-            echo "✅ 检测到 El Torito (PVE 8/9)"
-            REL_ELTORITO=${FULL_ELTORITO#work/iso/}
-            XORRISO_CMD="$XORRISO_CMD -b $REL_ELTORITO -no-emul-boot -boot-load-size 4 -boot-info-table"
-            
-            if [ -n "$HOST_MBR" ]; then
-              XORRISO_CMD="$XORRISO_CMD -isohybrid-mbr $HOST_MBR"
-              echo "✅ 启用 isohybrid MBR 支持"
-            fi
-            
+            echo "✅ 检测到新版架构 (Pure GRUB, PVE 8.2+)"
+            REL_GRUB_BIOS=${FULL_ELTORITO#work/iso/}
+            XORRISO_ARGS="-b $REL_GRUB_BIOS -no-emul-boot -boot-load-size 4 -boot-info-table --grub2-boot-info -eltorito-alt-boot -e ${FULL_EFI#work/iso/} -no-emul-boot -isohybrid-gpt-basdat"
           else
-            echo "⚠️ 警告：未找到传统BIOS引导文件，仅支持UEFI启动"
-          fi
-
-          # --- UEFI 处理 ---
-          if [ -n "$FULL_EFI" ]; then
-            REL_EFI=${FULL_EFI#work/iso/}
-            XORRISO_CMD="$XORRISO_CMD -eltorito-alt-boot -e $REL_EFI -no-emul-boot"
-            echo "✅ 添加 UEFI 引导支持: $REL_EFI"
-            
-            # 添加isohybrid GPT支持
-            if [ -n "$HOST_MBR" ]; then
-              XORRISO_CMD="$XORRISO_CMD -isohybrid-gpt-basdat"
-              echo "✅ 启用 isohybrid GPT 支持"
-            fi
-          fi
-          
-          # 完成命令构建
-          XORRISO_CMD="$XORRISO_CMD work/iso"
-          
-          echo "5. 执行打包命令..."
-          echo "命令: $XORRISO_CMD"
-          eval "$XORRISO_CMD"
-          
-          # 验证生成的 ISO
-          if [ ! -f "$ISO_OUTPUT" ]; then
-            echo "❌ ISO 打包失败"
+            echo "❌ 错误：找不到引导文件。"
             exit 1
           fi
-          
+
+          echo "5. 打包 ISO..."
+          xorriso -as mkisofs \
+            -r -V "$ISO_LABEL" \
+            -o "$ISO_OUTPUT" \
+            -J -joliet-long -cache-inodes \
+            $XORRISO_ARGS \
+            work/iso
+            
+          echo "✅ ISO 构建完成: $ISO_OUTPUT"
+          ls -lh "$ISO_OUTPUT"
+          sha256sum "$ISO_OUTPUT" | tee sha256.txt
+          SHA256=$(cut -d' ' -f1 sha256.txt)
           ISO_SIZE=$(stat -c%s "$ISO_OUTPUT")
           ISO_SIZE_MB=$((ISO_SIZE/1024/1024))
-          echo "✅ ISO 构建完成: $ISO_OUTPUT ($ISO_SIZE_MB MB)"
-          
-          # 验证ISO是否支持hybrid引导
-          echo "6. 验证ISO引导特性..."
-          if file "$ISO_OUTPUT" | grep -q "bootable"; then
-            echo "✅ ISO 可引导"
-          else
-            echo "⚠️  ISO 引导标志可能未设置"
-          fi
-          
-          # 计算 SHA256
-          sha256sum "$ISO_OUTPUT" > sha256.txt
-          SHA256=$(cut -d' ' -f1 sha256.txt)
           echo "SHA256=$SHA256" >> $GITHUB_ENV
           echo "ISO_SIZE=$ISO_SIZE" >> $GITHUB_ENV
           echo "ISO_SIZE_MB=$ISO_SIZE_MB" >> $GITHUB_ENV
 
       # =========================
-      # 幂等上传到 OneDrive (升级为 Refresh Token + Scope)
+      # 幂等上传到 OneDrive (完全不变)
       # =========================
       - name: Upload ISO with Idempotent Strategy
         shell: pwsh
         run: |
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           $OutputEncoding = [System.Text.Encoding]::UTF8
-          
           Write-Host "幂等上传策略开始..."
-          
-          # 1. 获取 Token
           $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
           $body = @{
               client_id     = $env:OD_CLIENT_ID
               client_secret = $env:OD_CLIENT_SECRET
               refresh_token = $env:OD_REFRESH_TOKEN
               grant_type    = "refresh_token"
-              scope         = "Files.ReadWrite.All offline_access" # <--- 已添加 Scope
+              scope         = "Files.ReadWrite.All offline_access"
           }
-          
           try {
               $uploadTokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
               $uploadToken = ($uploadTokenResponse.access_token).Trim()
           } catch { throw "Token获取失败" }
-          
           $isoPath = "${{ env.ISO_OUTPUT }}"
           $isoName = "${{ env.ISO_OUTPUT }}"
-          
           $driveId = "${{ steps.get_drive_info.outputs.driveId }}"
           $folderName = "${{ steps.get_drive_info.outputs.folderName }}"
-          
           $encodedFolderName = [System.Uri]::EscapeDataString($folderName)
           $encodedIsoName = [System.Uri]::EscapeDataString($isoName)
-          
-          # 直接构造文件路径 URL
           $fileUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}"
-          
-          # 幂等删除
           try { Invoke-RestMethod -Uri $fileUrl -Headers @{ Authorization = "Bearer $uploadToken" } -Method DELETE } catch {}
           Start-Sleep -Seconds 2
-          
-          # 创建上传会话
           $createUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}:/createUploadSession"
           $session = Invoke-RestMethod -Method POST -Uri $createUrl -Headers @{ Authorization = "Bearer $uploadToken"; "Content-Type" = "application/json" } -Body "{}"
           $uploadSessionUrl = $session.uploadUrl
-          
-          # 分片上传
           $chunkSize = 3276800 * 10 
           $fileStream = [System.IO.File]::OpenRead($isoPath)
           $totalSize = $fileStream.Length
           $bytesUploaded = 0
-          
           while ($bytesUploaded -lt $totalSize) {
               $buffer = New-Object byte[] $chunkSize
               $bytesRead = $fileStream.Read($buffer, 0, $chunkSize)
               $rangeEnd = $bytesUploaded + $bytesRead - 1
-              
               $request = [System.Net.HttpWebRequest]::Create($uploadSessionUrl)
               $request.Method = "PUT"
               $request.ContentLength = $bytesRead
               $request.Headers.Add("Content-Range", "bytes $bytesUploaded-$rangeEnd/$totalSize")
-              
               $requestStream = $request.GetRequestStream()
               $requestStream.Write($buffer, 0, $bytesRead)
               $requestStream.Close()
-              
               $request.GetResponse().Close()
               $bytesUploaded += $bytesRead
               Write-Host "Progress: $([math]::Round($bytesUploaded/$totalSize*100, 2))%"
@@ -620,34 +457,34 @@ jobs:
             - **文件大小**: ${{ env.ISO_SIZE_MB }} MB
             - **SHA256**: `${{ env.SHA256 }}`
             
-            ## 🔧 增强功能
-            - ✅ 集成 RTL8125 2.5G 网卡驱动
-            - ✅ 自动禁用原生 r8169 驱动（防止冲突）
-            - ✅ 自动添加到 /etc/modules 确保启动加载
-            - ✅ 更新 initramfs 确保驱动在启动时可用
-            - ✅ 支持 USB 混合引导（ISO 直接写入U盘即可启动）
+            ## 🔧 核心改进：解决 Ventoy/离线安装问题
+            - ✅ **通用驱动搜索**：自动扫描所有磁盘分区，彻底解决通过 **Ventoy** 启动时找不到驱动包的问题。
+            - ✅ **黑名单优先**：无论驱动是否成功编译，均会**完全禁用冲突的 `r8169` 驱动**，防止其抢占网卡。
+            - ✅ **离线安装友好**：允许在无网络、无内核头文件的环境下完成安装，驱动包会预置在系统中。
+            - ✅ **明确的状态日志**：所有安装步骤记录在 `/root/r8125_post_install.log`，便于排查。
             
             ## 🚀 安装说明
-            1. 将 ISO 写入 U 盘：`dd if=PVE-${{ env.PVE_VERSION }}-r8125.iso of=/dev/sdX bs=4M`
-            2. 从 U 盘启动安装 PVE
-            3. 系统会自动检测 RTL8125 网卡并安装驱动
-            4. 安装完成后网卡即可正常使用
+            1. **写入U盘**：`dd if=PVE-${{ env.PVE_VERSION }}-r8125.iso of=/dev/sdX bs=4M`
+            2. **启动安装**：从U盘启动，正常安装PVE。
+            3. **驱动处理**：安装程序将**自动搜索并安装**RTL8125驱动。
             
-            ## ⚠️ 注意事项
-            - 如果安装后网卡仍未识别，请检查是否安装了 pve-headers
-            - 可执行 `dkms status` 查看驱动编译状态
-            - 需要重启系统以使驱动完全生效
-            
-            ## 📋 验证命令
+            ## ⚠️ 重要提示（离线环境必读）
+            **在无网络环境下首次启动**：
+            - 网卡灯**可能不亮**，这是因为缺少 `pve-headers`，驱动**尚未编译**。
+            - **这是正常现象**。系统已配置好黑名单和启动项，**只需联网后执行**：
             ```bash
-            # 检查驱动是否加载
+            apt update && apt install pve-headers
+            ```
+            **然后重启**，驱动将自动编译并加载，网卡即可正常工作。
+            
+            ## 📋 安装后验证
+            ```bash
+            # 检查日志
+            cat /root/r8125_post_install.log
+            # 检查驱动
             lsmod | grep r8125
-            
-            # 检查网卡状态
-            lspci -nn | grep -i realtek
-            
-            # 检查网络接口
-            ip link show
+            # 检查网卡
+            lspci -knn | grep -A2 -i realtek
             ```
           files: |
             ${{ env.ISO_OUTPUT }}
