@@ -1,0 +1,64 @@
+name: Convert APK to IPK
+
+on:
+  workflow_dispatch:          # 允许手动触发
+  push:
+    tags: ['v*']             # 推送 tag 时自动发布 Release
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载 APK 文件
+        run: |
+          wget https://opkg.cooluc.com/openwrt-25.12/x86_64/vmlinux-btf-6.12.79.apk
+
+      - name: 解压并重新打包为 IPK
+        run: |
+          # 创建工作目录
+          mkdir -p ipk_build/data ipk_build/control temp_apk
+          
+          # 1. 解压 APK
+          tar -xzf vmlinux-btf-6.12.79.apk -C temp_apk
+          
+          # 2. 提取数据文件（鲁棒过滤：排除 APK 专有的 . 开头元数据文件）
+          #    -maxdepth 1 仅处理顶层，-exec cp -r {} 复制目录和文件
+          find temp_apk -maxdepth 1 ! -name ".*" ! -name "temp_apk" -exec cp -r {} ipk_build/data/ \;
+          
+          # 3. 创建 control 文件（使用 "EOF" 防止变量解析，末尾追加空行）
+          cat > ipk_build/control/control << "EOF"
+Package: vmlinux-btf
+Version: 6.12.79
+Architecture: x86_64
+Maintainer: Your Name <your@email.com>
+Description: Linux kernel vmlinux with BTF info for dae
+ This package provides BTF information required by dae eBPF.
+EOF
+          echo "" >> ipk_build/control/control   # 确保末尾空行
+          
+          # 4. 打包 data.tar.gz 和 control.tar.gz（使用 . 确保路径纯净）
+          cd ipk_build/data && tar -czf ../data.tar.gz . && cd ../..
+          cd ipk_build/control && tar -czf ../control.tar.gz . && cd ../..
+          
+          # 5. 生成 debian-binary 并合并为最终 .ipk
+          echo "2.0" > ipk_build/debian-binary
+          cd ipk_build && tar -czf ../vmlinux-btf-6.12.79.ipk debian-binary control.tar.gz data.tar.gz
+          
+          # 清理临时目录
+          cd .. && rm -rf temp_apk ipk_build
+
+      - name: 上传 IPK 作为 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vmlinux-btf-6.12.79
+          path: vmlinux-btf-6.12.79.ipk
+
+      - name: 创建 GitHub Release 并上传 IPK
+        uses: softprops/action-gh-release@v1
+        # 满足以下任一条件即触发：推送 tag 或 手动执行
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        with:
+          files: vmlinux-btf-6.12.79.ipk
+          generate_release_notes: true
+          # 手动触发时若没有 tag，会发布为“预发布”或基于 commit SHA，不会覆盖正式版
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') }}
