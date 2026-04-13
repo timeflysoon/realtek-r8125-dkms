@@ -1,30 +1,62 @@
 name: Convert APK to IPK
 
 on:
-  workflow_dispatch:          # 允许手动触发
+  workflow_dispatch:
   push:
-    tags: ['v*']             # 推送 tag 时自动发布 Release
+    tags: ['v*']
 
 jobs:
   convert:
     runs-on: ubuntu-latest
     steps:
-      - name: 下载 APK 文件
+      - name: 下载并检查文件
         run: |
-          wget https://opkg.cooluc.com/openwrt-25.12/x86_64/vmlinux-btf-6.12.79.apk
+          # 下载文件
+          wget --no-check-certificate https://opkg.cooluc.com/openwrt-25.12/x86_64/vmlinux-btf-6.12.79.apk -O input.apk
+          
+          # 诊断文件类型
+          echo "=== 文件类型检测 ==="
+          file input.apk
+          
+          echo "=== 文件大小 ==="
+          ls -lh input.apk
+          
+          echo "=== 文件头 ==="
+          xxd -l 32 input.apk
+          
+          # 检查是否是 HTML 错误页面
+          if grep -q "<html" input.apk 2>/dev/null; then
+            echo "ERROR: 文件是 HTML 页面，URL 可能无效"
+            cat input.apk
+            exit 1
+          fi
 
       - name: 解压并重新打包为 IPK
         run: |
-          # 创建工作目录
           mkdir -p ipk_build/data ipk_build/control temp_apk
           
-          # 1. 解压 APK
-          tar -xzf vmlinux-btf-6.12.79.apk -C temp_apk
+          # 尝试多种解压方式
+          if tar -xzf input.apk -C temp_apk 2>/dev/null; then
+            echo "成功以 tar.gz 格式解压"
+          elif ar x input.apk && tar -xzf data.tar.gz -C temp_apk 2>/dev/null; then
+            echo "成功以 deb/ar 格式解压"
+          elif unzip -q input.apk -d temp_apk 2>/dev/null; then
+            echo "成功以 zip 格式解压"
+          else
+            echo "ERROR: 无法识别的文件格式"
+            file input.apk
+            exit 1
+          fi
           
-          # 2. 提取数据文件（鲁棒过滤：排除 APK 专有的 . 开头元数据文件）
-          find temp_apk -maxdepth 1 ! -name ".*" ! -name "temp_apk" -exec cp -r {} ipk_build/data/ \;
+          # 提取数据文件
+          find temp_apk -maxdepth 1 ! -name ".*" ! -name "temp_apk" -exec cp -r {} ipk_build/data/ \; 2>/dev/null || true
           
-          # 3. 创建 control 文件（使用 printf 替代 heredoc 避免 YAML 解析问题）
+          # 如果没有数据文件，尝试进入子目录
+          if [ -z "$(ls -A ipk_build/data)" ]; then
+            find temp_apk -type f -exec cp --parents {} ipk_build/data/ \; 2>/dev/null || true
+          fi
+          
+          # 创建 control 文件
           printf '%s\n' \
             'Package: vmlinux-btf' \
             'Version: 6.12.79' \
@@ -34,16 +66,16 @@ jobs:
             ' This package provides BTF information required by dae eBPF.' \
             '' > ipk_build/control/control
           
-          # 4. 打包 data.tar.gz 和 control.tar.gz
+          # 打包
           cd ipk_build/data && tar -czf ../data.tar.gz . && cd ../..
           cd ipk_build/control && tar -czf ../control.tar.gz . && cd ../..
           
-          # 5. 生成 debian-binary 并合并为最终 .ipk
+          # 合并为 IPK
           echo "2.0" > ipk_build/debian-binary
           cd ipk_build && tar -czf ../vmlinux-btf-6.12.79.ipk debian-binary control.tar.gz data.tar.gz
           
-          # 清理临时目录
-          cd .. && rm -rf temp_apk ipk_build
+          echo "✅ 成功生成 vmlinux-btf-6.12.79.ipk"
+          ls -lh ../vmlinux-btf-6.12.79.ipk
 
       - name: 上传 IPK 作为 Artifact
         uses: actions/upload-artifact@v4
@@ -51,7 +83,7 @@ jobs:
           name: vmlinux-btf-6.12.79
           path: vmlinux-btf-6.12.79.ipk
 
-      - name: 创建 GitHub Release 并上传 IPK
+      - name: 创建 GitHub Release
         uses: softprops/action-gh-release@v1
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
