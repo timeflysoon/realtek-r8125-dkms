@@ -1,0 +1,36 @@
+name: Convert VMA.zst to VMDK
+
+on:
+  workflow_dispatch:          # 手动触发
+    inputs:
+      vma_file:
+        description: '要转换的 .vma.zst 文件名（需先上传到仓库根目录）'
+        required: true
+        default: 'vzdump-qemu-108-2026_04_20-11_33_44.vma.zst'
+
+  # 如果希望上传文件后自动触发，可改为 push 或 pull_request
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Pull zst2vmdk Docker image
+        run: docker pull astroicers/zst2vmdk:latest
+
+      - name: Convert .vma.zst to .vmdk
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/data \
+            astroicers/zst2vmdk:latest \
+            ${{ inputs.vma_file }}
+
+      - name: Upload converted VMDK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: converted-vmdk
+          path: '*.vmdk'
+          retention-days: 7
