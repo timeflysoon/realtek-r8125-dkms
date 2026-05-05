@@ -2,17 +2,15 @@ name: X-Account Auto KeepAlive
 
 on:
   schedule:
-    # 每天 2:30, 8:30, 14:30, 20:30 UTC
     - cron: '30 2,8,14,20 * * *'
   workflow_dispatch: {}
 
 jobs:
   run-x-account:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    # 【核心：消除 Node.js 20 警告】
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    permissions:
+      contents: read
+      secrets: write  # 核心：授予修改 Secret 的权限
 
     steps:
       - name: Checkout Code
@@ -27,18 +25,15 @@ jobs:
         run: pip install requests
 
       - name: Random Delay
-        shell: bash
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo ">>> Manual Trigger: Skipping delay."
-          else
-            # 随机休眠 0-45 分钟 (2700秒)
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
             WAIT_SEC=$((RANDOM % 2700))
             echo "错峰执行，随机等待 ${WAIT_SEC} 秒..."
             sleep $WAIT_SEC
           fi
 
       - name: Run Script for Account X
+        id: run_script  # 核心：设置 ID 供下一步读取输出
         env:
           GITHUB_REPO_NAME: ${{ github.repository }}
           CLIENT_ID: ${{ secrets.OD_CLIENT_ID }}
@@ -46,3 +41,13 @@ jobs:
           REFRESH_TOKEN: ${{ secrets.OD_REFRESH_TOKEN }}
           TENANT_ID: ${{ secrets.OD_TENANT_ID }}
         run: python main.py
+
+      - name: Update Refresh Token Secret
+        # 只有当脚本输出了新 Token 时才运行
+        if: steps.run_script.outputs.NEW_REFRESH_TOKEN != ''
+        uses: hman75/github-set-secret@v2.0.0
+        with:
+          name: 'OD_REFRESH_TOKEN'
+          value: ${{ steps.run_script.outputs.NEW_REFRESH_TOKEN }}
+          repository: ${{ github.repository }}
+          token: ${{ secrets.GITHUB_TOKEN }}
