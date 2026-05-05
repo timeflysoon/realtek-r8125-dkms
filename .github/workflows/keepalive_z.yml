@@ -2,17 +2,15 @@ name: Z-Account Auto KeepAlive
 
 on:
   schedule:
-    # 每天 0点, 6点, 12点, 18点 UTC
     - cron: '0 */6 * * *'
   workflow_dispatch: {}
 
 jobs:
   run-z-account:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    # 【核心：消除 Node.js 20 警告】
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    permissions:
+      contents: read
+      secrets: write
 
     steps:
       - name: Checkout Code
@@ -27,18 +25,15 @@ jobs:
         run: pip install requests
 
       - name: Random Delay
-        shell: bash
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo ">>> Manual Trigger: Skipping delay."
-          else
-            # 随机休眠 0-60 分钟 (3600秒)
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
             WAIT_SEC=$((RANDOM % 3600))
             echo "错峰执行，随机等待 ${WAIT_SEC} 秒..."
             sleep $WAIT_SEC
           fi
 
       - name: Run Script for Account Z
+        id: run_script
         env:
           GITHUB_REPO_NAME: ${{ github.repository }}
           CLIENT_ID: ${{ secrets.Z_CLIENT_ID }}
@@ -46,3 +41,12 @@ jobs:
           REFRESH_TOKEN: ${{ secrets.Z_REFRESH_TOKEN }}
           TENANT_ID: ${{ secrets.Z_TENANT_ID }}
         run: python main.py
+
+      - name: Update Refresh Token Secret
+        if: steps.run_script.outputs.NEW_REFRESH_TOKEN != ''
+        uses: hman75/github-set-secret@v2.0.0
+        with:
+          name: 'Z_REFRESH_TOKEN'
+          value: ${{ steps.run_script.outputs.NEW_REFRESH_TOKEN }}
+          repository: ${{ github.repository }}
+          token: ${{ secrets.GITHUB_TOKEN }}
