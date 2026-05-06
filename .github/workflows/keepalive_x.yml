@@ -8,12 +8,9 @@ on:
 jobs:
   run-x-account:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    # 采用最严谨的权限声明格式
     permissions:
       contents: read
       secrets: write
-
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
