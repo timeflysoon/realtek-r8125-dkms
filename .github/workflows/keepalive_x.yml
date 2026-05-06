@@ -8,9 +8,13 @@ on:
 jobs:
   run-x-account:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
-      secrets: write  # 核心：授予修改 Secret 的权限
+      secrets: write
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout Code
@@ -25,15 +29,17 @@ jobs:
         run: pip install requests
 
       - name: Random Delay
+        shell: bash
         run: |
-          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "Skip delay."
+          else
             WAIT_SEC=$((RANDOM % 2700))
-            echo "错峰执行，随机等待 ${WAIT_SEC} 秒..."
             sleep $WAIT_SEC
           fi
 
       - name: Run Script for Account X
-        id: run_script  # 核心：设置 ID 供下一步读取输出
+        id: run_script
         env:
           GITHUB_REPO_NAME: ${{ github.repository }}
           CLIENT_ID: ${{ secrets.OD_CLIENT_ID }}
@@ -43,7 +49,6 @@ jobs:
         run: python main.py
 
       - name: Update Refresh Token Secret
-        # 只有当脚本输出了新 Token 时才运行
         if: steps.run_script.outputs.NEW_REFRESH_TOKEN != ''
         uses: hman75/github-set-secret@v2.0.0
         with:
