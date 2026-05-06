@@ -11,9 +11,6 @@ jobs:
     permissions:
       contents: read
       secrets: write
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -26,7 +23,7 @@ jobs:
       - name: Install Requests
         run: pip install requests
 
-      - name: Run Script for Account X
+      - name: Run Script
         id: run_script
         env:
           GITHUB_REPO_NAME: ${{ github.repository }}
