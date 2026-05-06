@@ -8,9 +8,13 @@ on:
 jobs:
   run-z-account:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
       secrets: write
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout Code
@@ -24,14 +28,6 @@ jobs:
       - name: Install Requests
         run: pip install requests
 
-      - name: Random Delay
-        run: |
-          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
-            WAIT_SEC=$((RANDOM % 3600))
-            echo "错峰执行，随机等待 ${WAIT_SEC} 秒..."
-            sleep $WAIT_SEC
-          fi
-
       - name: Run Script for Account Z
         id: run_script
         env:
@@ -42,7 +38,7 @@ jobs:
           TENANT_ID: ${{ secrets.Z_TENANT_ID }}
         run: python main.py
 
-      - name: Update Refresh Token Secret
+      - name: Update Secret
         if: steps.run_script.outputs.NEW_REFRESH_TOKEN != ''
         uses: hman75/github-set-secret@v2.0.0
         with:
