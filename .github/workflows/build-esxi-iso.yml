@@ -165,10 +165,6 @@ jobs:
             "VMware-ESXi-8.0U3b-24280767-depot.zip",
             "nvme-community-driver_1.0.1.0-3vmw.700.1.0.15843807-component-18902434.zip",
             "VMware-Re-Driver_1.101.01-5vmw.800.1.0.20613240.zip",
-            "ESXi800-VMKUSB-NIC-FLING-64098182-component-21668107.zip",
-            "ESXi803-VMKUSB-NIC-FLING-76444229-component-24179899.zip",
-            "ESXi80U1-VMKUSB-NIC-FLING-64098092-component-21669994.zip",
-            "ESXi80U2-VMKUSB-NIC-FLING-67561870-component-22416446.zip",
             "ESXi80U3-VMKUSB-NIC-FLING-75399077-component-24052746.zip"
         )
         
@@ -228,10 +224,6 @@ jobs:
         $nvmeDriverZip = Join-Path $TEMP_DIR "nvme-community-driver_1.0.1.0-3vmw.700.1.0.15843807-component-18902434.zip"
         $reDriverZip = Join-Path $TEMP_DIR "VMware-Re-Driver_1.101.01-5vmw.800.1.0.20613240.zip"
         $usbFlingZips = @(
-            (Join-Path $TEMP_DIR "ESXi800-VMKUSB-NIC-FLING-64098182-component-21668107.zip"),
-            (Join-Path $TEMP_DIR "ESXi803-VMKUSB-NIC-FLING-76444229-component-24179899.zip"),
-            (Join-Path $TEMP_DIR "ESXi80U1-VMKUSB-NIC-FLING-64098092-component-21669994.zip"),
-            (Join-Path $TEMP_DIR "ESXi80U2-VMKUSB-NIC-FLING-67561870-component-22416446.zip"),
             (Join-Path $TEMP_DIR "ESXi80U3-VMKUSB-NIC-FLING-75399077-component-24052746.zip")
         )
         $outIso = Join-Path $TEMP_DIR "ESXi-8.0U3b-24280767-RTL8125BG.iso"
