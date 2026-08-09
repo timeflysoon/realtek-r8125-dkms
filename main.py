@@ -14,11 +14,11 @@ REFRESH_TOKEN = os.environ.get('REFRESH_TOKEN')
 TENANT_ID = os.environ.get('TENANT_ID')
 GITHUB_REPO = os.environ.get('GITHUB_REPO_NAME', 'Unknown-Repo')
 
-# ======== 新增：写回 GitHub Secrets 所需的配置 ========
+# ======== 写回 GitHub Secrets 所需的配置 ========
 GH_PAT = os.environ.get('GH_PAT')                    # 有 Secrets 读写权限的 PAT
 GH_REPOSITORY = os.environ.get('GITHUB_REPOSITORY')  # Actions 运行环境自带，格式 owner/repo
 SECRET_NAME = os.environ.get('SECRET_NAME')           # 要更新的 Secret 名（OD_REFRESH_TOKEN 或 Z_REFRESH_TOKEN）
-# ======== 新增结束 ========
+# ======== 配置结束 ========
 
 if not TENANT_ID:
     print("!! 致命错误: 缺少 TENANT_ID 环境变量")
@@ -46,7 +46,7 @@ def get_access_token(refresh_token):
             token_data = r.json()
             access_token = token_data['access_token']
             new_refresh_token = token_data.get('refresh_token')
-            
+
             if new_refresh_token and new_refresh_token != refresh_token:
                 print("✅ [Auth] 已获取新的 refresh_token")
             return access_token, new_refresh_token
@@ -77,49 +77,66 @@ def save_new_refresh_token(token, new_refresh_token):
         print(f"⚠️ 保存 refresh_token 备份失败: {e}")
 
 
-# ======== 新增：真正让新 token 生效——写回 GitHub Secrets ========
-def update_github_secret(new_refresh_token):
-    """把新 refresh_token 加密后写入 GitHub Secrets，下次运行直接生效"""
+# ======== 写回 GitHub Secrets：加入重试机制，失败时明确返回 False ========
+def update_github_secret(new_refresh_token, max_retries=3, retry_backoff_sec=3):
+    """
+    把新 refresh_token 加密后写入 GitHub Secrets，下次运行直接生效。
+    加入重试（默认最多 3 次，指数退避），任一次成功即返回 True；
+    全部重试用尽仍失败，返回 False，由调用方决定是否让本次 job 失败告警。
+    """
     if not new_refresh_token:
-        return
+        # 没有拿到新 token，不算写回失败，只是没有需要写回的内容
+        return True
+
     if not GH_PAT or not GH_REPOSITORY or not SECRET_NAME:
         print("⚠️ [GH Secret] 缺少 GH_PAT / GITHUB_REPOSITORY / SECRET_NAME，跳过写回 Secrets（仅完成 OneDrive 备份）")
-        return
+        return False
 
     headers = {
         'Authorization': f'Bearer {GH_PAT}',
         'Accept': 'application/vnd.github+json'
     }
 
-    try:
-        # 1. 获取仓库公钥
-        key_resp = requests.get(
-            f'https://api.github.com/repos/{GH_REPOSITORY}/actions/secrets/public-key',
-            headers=headers, timeout=15
-        )
-        key_resp.raise_for_status()
-        key_data = key_resp.json()
-        public_key = key_data['key']
-        key_id = key_data['key_id']
+    for attempt in range(1, max_retries + 1):
+        try:
+            # 1. 获取仓库公钥
+            key_resp = requests.get(
+                f'https://api.github.com/repos/{GH_REPOSITORY}/actions/secrets/public-key',
+                headers=headers, timeout=15
+            )
+            key_resp.raise_for_status()
+            key_data = key_resp.json()
+            public_key = key_data['key']
+            key_id = key_data['key_id']
 
-        # 2. libsodium sealed box 加密（GitHub Secrets API 要求的加密方式）
-        public_key_obj = public.PublicKey(public_key.encode('utf-8'), encoding.Base64Encoder())
-        sealed_box = public.SealedBox(public_key_obj)
-        encrypted = sealed_box.encrypt(new_refresh_token.encode('utf-8'))
-        encrypted_b64 = base64.b64encode(encrypted).decode('utf-8')
+            # 2. libsodium sealed box 加密（GitHub Secrets API 要求的加密方式）
+            public_key_obj = public.PublicKey(public_key.encode('utf-8'), encoding.Base64Encoder())
+            sealed_box = public.SealedBox(public_key_obj)
+            encrypted = sealed_box.encrypt(new_refresh_token.encode('utf-8'))
+            encrypted_b64 = base64.b64encode(encrypted).decode('utf-8')
 
-        # 3. 写入指定的 Secret
-        put_resp = requests.put(
-            f'https://api.github.com/repos/{GH_REPOSITORY}/actions/secrets/{SECRET_NAME}',
-            headers=headers,
-            json={'encrypted_value': encrypted_b64, 'key_id': key_id},
-            timeout=15
-        )
-        put_resp.raise_for_status()
-        print(f"✅ [GH Secret] {SECRET_NAME} 已成功更新，下次运行自动生效")
-    except Exception as e:
-        print(f"⚠️ [GH Secret] 写回 Secrets 失败: {e}")
-# ======== 新增结束 ========
+            # 3. 写入指定的 Secret
+            put_resp = requests.put(
+                f'https://api.github.com/repos/{GH_REPOSITORY}/actions/secrets/{SECRET_NAME}',
+                headers=headers,
+                json={'encrypted_value': encrypted_b64, 'key_id': key_id},
+                timeout=15
+            )
+            put_resp.raise_for_status()
+            print(f"✅ [GH Secret] {SECRET_NAME} 已成功更新（第 {attempt} 次尝试），下次运行自动生效")
+            return True
+        except Exception as e:
+            print(f"⚠️ [GH Secret] 第 {attempt}/{max_retries} 次写回失败: {e}")
+            if attempt < max_retries:
+                wait = retry_backoff_sec * attempt
+                print(f"    -> {wait}s 后重试...")
+                time.sleep(wait)
+
+    print(f"❌ [GH Secret] {SECRET_NAME} 写回彻底失败（已重试 {max_retries} 次）！"
+          f"请立即人工检查 GH_PAT 权限 / 网络 / GitHub API 状态。"
+          f"当前有效 refresh_token 已备份在 OneDrive({REFRESH_TOKEN_FILE})，可手动同步。")
+    return False
+# ======== 写回逻辑结束 ========
 
 
 # ================= 🚧 抢占逻辑 =================
@@ -127,9 +144,9 @@ def try_lock(token, today_str, current_period):
     headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
     lock_file = f"lock_{today_str}_{current_period}.json"
     lock_url = f"{GRAPH_URL}/me/drive/root:{LOCK_FOLDER}/{lock_file}:/content?@microsoft.graph.conflictBehavior=fail"
-    
+
     lock_data = {"locked_by": GITHUB_REPO, "time": datetime.now(timezone.utc).strftime('%H:%M:%S')}
-    
+
     try:
         r = requests.put(lock_url, headers=headers, json=lock_data, timeout=20)
         if r.status_code == 201:
@@ -168,7 +185,7 @@ def task_update_log(token):
             lines = old_content.splitlines()
             if len(lines) > 100:
                 old_content = "\n".join(lines[:1] + lines[-99:])
-        
+
         new_row = f"\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{GITHUB_REPO},KeepAlive_OK"
         requests.put(log_url, headers=headers, data=(old_content + new_row).encode('utf-8'), timeout=15)
         print("    ✅ 日志更新成功")
@@ -182,13 +199,13 @@ def task_send_mail(token, old_log, today_str):
     if f"{today_str},MAIL_SENT" in old_log:
         print("\n>>> [Task 3] 邮件跳过：今日已有账号发送。")
         return
-   
+
     print("\n>>> [Task 3] 发送每日提醒邮件")
     headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
     try:
         r_me = requests.get(f'{GRAPH_URL}/me', headers=headers, timeout=10)
         my_email = r_me.json().get('userPrincipalName')
-        
+
         mail_data = {
             "message": {
                 "subject": f"Office365 KeepAlive: {today_str}",
@@ -213,14 +230,14 @@ def task_upload_large_file(token):
     try:
         file_size = random.randint(1, 5) * 1024 * 1024
         file_name = f"Auto_{int(time.time())}.bin"
-        
+
         session_url = f'{GRAPH_URL}/me/drive/root:{DATA_FOLDER}/{file_name}:/createUploadSession'
-        r_session = requests.post(session_url, headers=headers, 
+        r_session = requests.post(session_url, headers=headers,
                                 json={"item": {"@microsoft.graph.conflictBehavior": "rename"}}, timeout=15)
         upload_url = r_session.json()['uploadUrl']
-        
+
         requests.put(upload_url, data=b'\0' * file_size,
-                    headers={'Content-Length': str(file_size), 'Content-Range': f'bytes 0-{file_size-1}/{file_size}'}, 
+                    headers={'Content-Length': str(file_size), 'Content-Range': f'bytes 0-{file_size-1}/{file_size}'},
                     timeout=60)
         print(f"    ✅ 上传完成: {file_name} ({file_size//(1024*1024)}MB)")
     except Exception as e:
@@ -259,10 +276,16 @@ def main():
         print("!! 无法获取访问令牌，请检查 GitHub Secrets 中的 REFRESH_TOKEN 是否有效。")
         sys.exit(1)
 
-    # ======== 修改：新 token 到手后，双写——OneDrive 备份 + 直接写回 GitHub Secrets 生效 ========
+    # ======== 新 token 到手后，双写：OneDrive 备份 + 写回 GitHub Secrets 生效 ========
+    # 写回失败时（重试用尽仍失败）主动 exit(1)，让本次 Action 在面板上标红报警，
+    # 而不是静默吞掉异常、直到下次刷新彻底失效才被发现。
     if new_refresh:
         save_new_refresh_token(token, new_refresh)
-        update_github_secret(new_refresh)
+        secret_write_ok = update_github_secret(new_refresh)
+        if not secret_write_ok:
+            print("\n!! [致命] GitHub Secret 写回失败，本次任务标记为失败以便及时告警。")
+            print("!! 当前有效的新 refresh_token 已保存在 OneDrive 备份中，可手动同步进 GitHub Secrets。")
+            sys.exit(1)
     # ======== 修改结束 ========
 
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
