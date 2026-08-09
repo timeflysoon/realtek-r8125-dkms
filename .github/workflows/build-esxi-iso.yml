@@ -124,8 +124,7 @@ jobs:
         # ======== 修改点 2：检测微软是否随本次刷新返回了新的 refresh_token（微软的 refresh token
         #          每次使用后可能会轮换），如果检测到新值且与当前 Secret 不同，写入临时文件并置标记，
         #          交由后面的 "Update Refresh Token Secret if Rotated" 步骤统一写回 GitHub Secrets，
-        #          避免下次因 90 天不活动导致 token 过期。临时文件写在 RUNNER_TEMP，任务结束后自动清理，
-        #          且后续步骤用完会显式删除，不落盘持久化，降低泄露风险。========
+        #          避免下次因 90 天不活动导致 token 过期。临时文件写在 RUNNER_TEMP，用完显式删除。========
         if ($tokenResponse.refresh_token -and $tokenResponse.refresh_token -ne $env:OD_REFRESH_TOKEN) {
             Write-Host "检测到新的 refresh_token，准备写回 GitHub Secrets..."
             $tokenResponse.refresh_token | Out-File -FilePath "$env:RUNNER_TEMP\new_refresh_token.txt" -Encoding utf8 -NoNewline
@@ -172,41 +171,43 @@ jobs:
         $pythonPath = $env:PYTHON_PATH
         $newToken = Get-Content -Path "$env:RUNNER_TEMP\new_refresh_token.txt" -Raw
         
+        # ======== 修改点 4：修复 YAML 语法报错的根本原因——之前 Python heredoc 里的每一行
+        #          都是顶格写（无缩进），比 run: | 块内其余 PowerShell 代码缩进浅，导致 YAML 
+        #          块状标量提前截断、后续内容被当成非法 YAML 解析。这里把 heredoc 内所有行统一
+        #          缩进到与其余代码一致的层级（8个空格），问题即可解决。========
         $pyScript = @"
-import os, requests, base64
-from nacl import encoding, public
+        import os, requests, base64
+        from nacl import encoding, public
 
-github_token = os.environ['GITHUB_TOKEN']
-repo = os.environ['GITHUB_REPOSITORY']
-new_secret_value = os.environ['NEW_TOKEN_VALUE']
+        github_token = os.environ['GITHUB_TOKEN']
+        repo = os.environ['GITHUB_REPOSITORY']
+        new_secret_value = os.environ['NEW_TOKEN_VALUE']
 
-headers = {
-    'Authorization': f'Bearer {github_token}',
-    'Accept': 'application/vnd.github+json'
-}
+        headers = {
+            'Authorization': f'Bearer {github_token}',
+            'Accept': 'application/vnd.github+json'
+        }
 
-# 1. 获取仓库公钥
-key_resp = requests.get(f'https://api.github.com/repos/{repo}/actions/secrets/public-key', headers=headers)
-key_resp.raise_for_status()
-key_data = key_resp.json()
-public_key = key_data['key']
-key_id = key_data['key_id']
+        key_resp = requests.get(f'https://api.github.com/repos/{repo}/actions/secrets/public-key', headers=headers)
+        key_resp.raise_for_status()
+        key_data = key_resp.json()
+        public_key = key_data['key']
+        key_id = key_data['key_id']
 
-# 2. 用公钥加密（libsodium sealed box，GitHub Secrets API 要求的加密方式）
-public_key_obj = public.PublicKey(public_key.encode('utf-8'), encoding.Base64Encoder())
-sealed_box = public.SealedBox(public_key_obj)
-encrypted = sealed_box.encrypt(new_secret_value.encode('utf-8'))
-encrypted_b64 = base64.b64encode(encrypted).decode('utf-8')
+        public_key_obj = public.PublicKey(public_key.encode('utf-8'), encoding.Base64Encoder())
+        sealed_box = public.SealedBox(public_key_obj)
+        encrypted = sealed_box.encrypt(new_secret_value.encode('utf-8'))
+        encrypted_b64 = base64.b64encode(encrypted).decode('utf-8')
 
-# 3. 写入 Secret
-put_resp = requests.put(
-    f'https://api.github.com/repos/{repo}/actions/secrets/OD_REFRESH_TOKEN',
-    headers=headers,
-    json={'encrypted_value': encrypted_b64, 'key_id': key_id}
-)
-put_resp.raise_for_status()
-print('✅ OD_REFRESH_TOKEN 已成功更新')
-"@
+        put_resp = requests.put(
+            f'https://api.github.com/repos/{repo}/actions/secrets/OD_REFRESH_TOKEN',
+            headers=headers,
+            json={'encrypted_value': encrypted_b64, 'key_id': key_id}
+        )
+        put_resp.raise_for_status()
+        print('OK: OD_REFRESH_TOKEN updated')
+        "@
+        # ======== 修改点 4 结束 ========
         
         $pyScript | Out-File -FilePath "$env:RUNNER_TEMP\update_secret.py" -Encoding utf8
         
@@ -266,8 +267,6 @@ print('✅ OD_REFRESH_TOKEN 已成功更新')
                 }
             } catch {
                 Write-Host "✗ $file - $($_.Exception.Message)"
-                # 可选：打印详细错误以便调试
-                # Write-Host $_.Exception.Response.StatusCode
             }
         }
         
@@ -365,7 +364,6 @@ print('✅ OD_REFRESH_TOKEN 已成功更新')
         Write-Host "========================================"
         Write-Host ""
         
-        # 0. 防御性编程：在步骤一开始就确保isoPath变量存在
         Write-Host "[0/7] 初始化ISO路径（防御性编程）..."
         $isoPath = $env:ISO_PATH
         if ([string]::IsNullOrEmpty($isoPath)) {
@@ -373,7 +371,6 @@ print('✅ OD_REFRESH_TOKEN 已成功更新')
             Write-Host "使用默认ISO路径: $isoPath"
         }
         
-        # 1. 获取全新的上传token（使用 Refresh Token）
         Write-Host ""
         Write-Host "[1/7] 获取全新的上传token..."
         $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
@@ -397,7 +394,6 @@ print('✅ OD_REFRESH_TOKEN 已成功更新')
             throw
         }
         
-        # 2. 验证ISO文件
         Write-Host ""
         Write-Host "[2/7] 验证ISO文件..."
         if (-not (Test-Path $isoPath)) { 
@@ -411,42 +407,35 @@ print('✅ OD_REFRESH_TOKEN 已成功更新')
         Write-Host "  - 文件名: $isoName"
         Write-Host "  - 文件大小: $([math]::Round($fileSize / 1MB, 2)) MB"
         
-        # 3. 准备驱动器和文件夹信息
         Write-Host ""
         Write-Host "[3/7] 准备路径信息..."
         $driveId = "${{ steps.get_drive_info.outputs.driveId }}"
         $folderName = "${{ steps.get_drive_info.outputs.folderName }}"
         
-        # 4. 构建文件路径
         Write-Host ""
         Write-Host "[4/7] 构建文件路径..."
         
         $encodedFolderName = [System.Uri]::EscapeDataString($folderName)
         $encodedIsoName = [System.Uri]::EscapeDataString($isoName)
-        # 直接使用 /drives/{id}/root:/{folder}/{file} 格式
         $fileUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}"
         
         Write-Host "文件完整URL:"
         Write-Host "  $fileUrl"
         Write-Host ""
         
-        # 5. 幂等操作核心：无条件删除现有文件
         Write-Host "[5/7] 执行幂等操作：无条件删除现有文件..."
         
         $uploadHeaders = @{ Authorization = "Bearer $uploadToken" }
         
         Write-Host "检查文件是否存在并尝试删除..."
         try {
-            # 尝试删除文件（幂等操作：删除不存在文件也返回成功）
             Invoke-RestMethod -Uri $fileUrl -Headers $uploadHeaders -Method DELETE
             Write-Host "✅ 文件删除成功（或原本不存在）"
             
-            # 等待删除操作完成并验证
             Write-Host "等待 2 秒确保删除操作完成..."
             Start-Sleep -Seconds 2
             
         } catch {
-            # 即使删除失败也继续尝试上传（可能报404即不存在）
             if ($_.Exception.Response.StatusCode -ne 404) {
                  Write-Host "⚠️ 删除操作异常: $($_.Exception.Message)"
             } else {
@@ -454,11 +443,9 @@ print('✅ OD_REFRESH_TOKEN 已成功更新')
             }
         }
         
-        # 6. 创建上传会话
         Write-Host ""
         Write-Host "[6/7] 创建上传会话（纯净请求体）..."
         
-        # 构建稳定的上传URL（使用root路径格式）
         $createUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}:/createUploadSession"
         
         Write-Host "使用稳定上传URL:"
@@ -470,7 +457,6 @@ print('✅ OD_REFRESH_TOKEN 已成功更新')
             "Content-Type" = "application/json"
         }
         
-        # 纯净请求体
         $bodyJson = @{} | ConvertTo-Json -Compress
         
         try {
@@ -485,11 +471,10 @@ print('✅ OD_REFRESH_TOKEN 已成功更新')
             Write-Host ""
             Write-Host "✅ 上传会话创建成功！"
             
-            # 7. 执行分片上传
             Write-Host ""
             Write-Host "[7/7] 执行分片上传..."
             
-            $chunkSize = 3276800 * 10  # 约31.25MB
+            $chunkSize = 3276800 * 10
             $fileStream = [System.IO.File]::OpenRead($isoPath)
             $totalChunks = [math]::Ceiling($fileSize / $chunkSize)
             $bytesUploaded = 0
@@ -533,7 +518,6 @@ print('✅ OD_REFRESH_TOKEN 已成功更新')
                             $responseStream.Close()
                             $response.Close()
                         } catch {
-                            # 忽略响应读取错误，只要请求成功发送
                         }
                         
                         $progress = [math]::Round(($rangeEnd + 1) / $fileSize * 100, 2)
@@ -632,13 +616,11 @@ print('✅ OD_REFRESH_TOKEN 已成功更新')
       run: |
         Write-Host "=== 删除旧的GitHub Release（如果存在）==="
         
-        # 提取tag名称（取"-RTL8125BG"之前的部分）
         $isoPath = "${{ steps.check-artifact.outputs.artifact_path }}"
         $isoName = Split-Path $isoPath -Leaf
         $tagName = $isoName -replace '\.iso$', '' -replace '-RTL8125BG$', ''
         Write-Host "提取的Tag名称: $tagName"
         
-        # 检查是否存在相同tag的Release
         $releasesUrl = "https://api.github.com/repos/${{ github.repository }}/releases"
         
         try {
@@ -659,7 +641,6 @@ print('✅ OD_REFRESH_TOKEN 已成功更新')
                 } -Method DELETE
                 Write-Host "✅ 旧Release删除成功"
                 
-                # 删除关联的tag
                 Write-Host "删除关联的tag: $tagName"
                 $deleteTagUrl = "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$tagName"
                 try {
@@ -676,7 +657,6 @@ print('✅ OD_REFRESH_TOKEN 已成功更新')
             }
         } catch {
             Write-Host "⚠️ 删除旧Release时出错: $_"
-            # 不抛出错误，继续执行
         }
 
     # =========================
