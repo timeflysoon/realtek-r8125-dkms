@@ -7,7 +7,7 @@ jobs:
   run-z-account:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    
+
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
@@ -18,9 +18,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install Dependencies
-        # ======== 修改点 1：新增 pynacl，用于加密写回 GitHub Secrets ========
         run: pip install requests pynacl
-        # ======== 修改点 1 结束 ========
       - name: Random Delay
         shell: bash
         run: |
@@ -38,8 +36,6 @@ jobs:
           CLIENT_SECRET: ${{ secrets.Z_CLIENT_SECRET }}
           REFRESH_TOKEN: ${{ secrets.Z_REFRESH_TOKEN }}
           TENANT_ID: ${{ secrets.Z_TENANT_ID }}
-          # ======== 修改点 2：新增写回 Secrets 所需的凭据与目标 Secret 名 ========
           GH_PAT: ${{ secrets.AUTH_PAT }}
           SECRET_NAME: Z_REFRESH_TOKEN
-          # ======== 修改点 2 结束 ========
         run: python main.py
