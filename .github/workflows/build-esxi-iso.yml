@@ -50,6 +50,9 @@ jobs:
         & $pythonPath -m pip install --upgrade pip
         # 安装 PowerCLI 依赖的特定库
         & $pythonPath -m pip install six lxml psutil pyopenssl
+        # ======== 修改点 1：预装 PyNaCl 与 requests，供后面写回 refresh_token 到 GitHub Secrets 时加密使用 ========
+        & $pythonPath -m pip install pynacl requests
+        # ======== 修改点 1 结束 ========
         
         # 验证模块加载（确保 DLL 路径正确）
         & $pythonPath -c "import six; import lxml; import psutil; import OpenSSL; print('Python environment sanity check passed')"
@@ -117,6 +120,21 @@ jobs:
             Write-Error "刷新访问令牌失败: $_"
             throw
         }
+
+        # ======== 修改点 2：检测微软是否随本次刷新返回了新的 refresh_token（微软的 refresh token
+        #          每次使用后可能会轮换），如果检测到新值且与当前 Secret 不同，写入临时文件并置标记，
+        #          交由后面的 "Update Refresh Token Secret if Rotated" 步骤统一写回 GitHub Secrets，
+        #          避免下次因 90 天不活动导致 token 过期。临时文件写在 RUNNER_TEMP，任务结束后自动清理，
+        #          且后续步骤用完会显式删除，不落盘持久化，降低泄露风险。========
+        if ($tokenResponse.refresh_token -and $tokenResponse.refresh_token -ne $env:OD_REFRESH_TOKEN) {
+            Write-Host "检测到新的 refresh_token，准备写回 GitHub Secrets..."
+            $tokenResponse.refresh_token | Out-File -FilePath "$env:RUNNER_TEMP\new_refresh_token.txt" -Encoding utf8 -NoNewline
+            "NEW_REFRESH_TOKEN_DETECTED=true" >> $env:GITHUB_ENV
+        } else {
+            Write-Host "未检测到新的 refresh_token，沿用现有值"
+            "NEW_REFRESH_TOKEN_DETECTED=false" >> $env:GITHUB_ENV
+        }
+        # ======== 修改点 2 结束 ========
         
         # 直接获取当前用户的 Drive ID
         Write-Host "正在获取 Drive ID..."
@@ -140,6 +158,65 @@ jobs:
             Write-Error "获取驱动信息失败: $_"
             throw
         }
+
+    # ======== 修改点 3：新增独立步骤，仅在检测到新 refresh_token 时执行，
+    #          用仓库公钥加密后调用 GitHub API 写回 OD_REFRESH_TOKEN 这个 Secret ========
+    - name: Update Refresh Token Secret if Rotated
+      if: env.NEW_REFRESH_TOKEN_DETECTED == 'true'
+      shell: pwsh
+      env:
+        GITHUB_TOKEN: ${{ secrets.AUTH_PAT }}
+      run: |
+        Write-Host "=== 写回新的 refresh_token 到 GitHub Secrets ==="
+        
+        $pythonPath = $env:PYTHON_PATH
+        $newToken = Get-Content -Path "$env:RUNNER_TEMP\new_refresh_token.txt" -Raw
+        
+        $pyScript = @"
+import os, requests, base64
+from nacl import encoding, public
+
+github_token = os.environ['GITHUB_TOKEN']
+repo = os.environ['GITHUB_REPOSITORY']
+new_secret_value = os.environ['NEW_TOKEN_VALUE']
+
+headers = {
+    'Authorization': f'Bearer {github_token}',
+    'Accept': 'application/vnd.github+json'
+}
+
+# 1. 获取仓库公钥
+key_resp = requests.get(f'https://api.github.com/repos/{repo}/actions/secrets/public-key', headers=headers)
+key_resp.raise_for_status()
+key_data = key_resp.json()
+public_key = key_data['key']
+key_id = key_data['key_id']
+
+# 2. 用公钥加密（libsodium sealed box，GitHub Secrets API 要求的加密方式）
+public_key_obj = public.PublicKey(public_key.encode('utf-8'), encoding.Base64Encoder())
+sealed_box = public.SealedBox(public_key_obj)
+encrypted = sealed_box.encrypt(new_secret_value.encode('utf-8'))
+encrypted_b64 = base64.b64encode(encrypted).decode('utf-8')
+
+# 3. 写入 Secret
+put_resp = requests.put(
+    f'https://api.github.com/repos/{repo}/actions/secrets/OD_REFRESH_TOKEN',
+    headers=headers,
+    json={'encrypted_value': encrypted_b64, 'key_id': key_id}
+)
+put_resp.raise_for_status()
+print('✅ OD_REFRESH_TOKEN 已成功更新')
+"@
+        
+        $pyScript | Out-File -FilePath "$env:RUNNER_TEMP\update_secret.py" -Encoding utf8
+        
+        $env:NEW_TOKEN_VALUE = $newToken
+        & $pythonPath "$env:RUNNER_TEMP\update_secret.py"
+        
+        # 清理临时文件，避免明文残留在 Runner 磁盘上
+        Remove-Item -Path "$env:RUNNER_TEMP\new_refresh_token.txt" -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path "$env:RUNNER_TEMP\update_secret.py" -Force -ErrorAction SilentlyContinue
+    # ======== 修改点 3 结束 ========
 
     # 步骤二：下载文件（已更新为 Refresh Token 模式）
     - name: Download ESXi Depot Files
