@@ -35,11 +35,11 @@ jobs:
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
         Write-Host "=== Install Python Modules ==="
-        
+
         # 使用经过验证的绝对物理路径，避开 Runner 的 Shim 陷阱
         $pythonPath = "C:\hostedtoolcache\windows\Python\3.12.10\x64\python.exe"
         Write-Host "Using Verified Hardcoded Path: $pythonPath"
-        
+
         # 双重检查：确保文件真的在那里
         if (-not (Test-Path $pythonPath)) {
             Write-Error "CRITICAL: The verified path does not exist! setup-python failed to populate cache?"
@@ -50,13 +50,12 @@ jobs:
         & $pythonPath -m pip install --upgrade pip
         # 安装 PowerCLI 依赖的特定库
         & $pythonPath -m pip install six lxml psutil pyopenssl
-        # ======== 修改点 1：预装 PyNaCl 与 requests，供后面写回 refresh_token 到 GitHub Secrets 时加密使用 ========
+        # 预装 PyNaCl 与 requests，供后面写回 refresh_token 到 GitHub Secrets 时加密使用
         & $pythonPath -m pip install pynacl requests
-        # ======== 修改点 1 结束 ========
-        
+
         # 验证模块加载（确保 DLL 路径正确）
         & $pythonPath -c "import six; import lxml; import psutil; import OpenSSL; print('Python environment sanity check passed')"
-        
+
         "PYTHON_PATH=$pythonPath" >> $env:GITHUB_ENV
 
     # 3. 安装 PowerCLI
@@ -75,10 +74,10 @@ jobs:
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
         Write-Host "=== Configure PowerCLI ==="
-        
+
         $pythonPath = $env:PYTHON_PATH
         Write-Host "Configuring PowerCLI to use physical executable: $pythonPath"
-        
+
         # 这里必须是物理路径，ImageBuilder 才能找到同目录下的 DLL
         Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $false -PythonPath $pythonPath -Confirm:$false
         Get-PowerCLIConfiguration
@@ -99,7 +98,7 @@ jobs:
       id: get_drive_info
       run: |
         Write-Host "=== 获取 OneDrive 驱动信息 ==="
-        
+
         # 使用 Refresh Token 获取 Access Token
         $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
         $body = @{
@@ -108,12 +107,12 @@ jobs:
             refresh_token = $env:OD_REFRESH_TOKEN
             grant_type    = "refresh_token"
         }
-        
+
         Write-Host "正在刷新访问令牌..."
         try {
             $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
             $token = ($tokenResponse.access_token).Trim()
-            
+
             if ([string]::IsNullOrEmpty($token)) { throw "获取到的访问令牌为空" }
             Write-Host "✓ 访问令牌刷新成功"
         } catch {
@@ -121,10 +120,10 @@ jobs:
             throw
         }
 
-        # ======== 修改点 2：检测微软是否随本次刷新返回了新的 refresh_token（微软的 refresh token
-        #          每次使用后可能会轮换），如果检测到新值且与当前 Secret 不同，写入临时文件并置标记，
-        #          交由后面的 "Update Refresh Token Secret if Rotated" 步骤统一写回 GitHub Secrets，
-        #          避免下次因 90 天不活动导致 token 过期。临时文件写在 RUNNER_TEMP，用完显式删除。========
+        # 检测微软是否随本次刷新返回了新的 refresh_token（微软的 refresh token
+        # 每次使用后可能会轮换），如果检测到新值且与当前 Secret 不同，写入临时文件并置标记，
+        # 交由后面的 "Update Refresh Token Secret if Rotated" 步骤统一写回 GitHub Secrets，
+        # 避免下次因 90 天不活动导致 token 过期。临时文件写在 RUNNER_TEMP，用完显式删除。
         if ($tokenResponse.refresh_token -and $tokenResponse.refresh_token -ne $env:OD_REFRESH_TOKEN) {
             Write-Host "检测到新的 refresh_token，准备写回 GitHub Secrets..."
             $tokenResponse.refresh_token | Out-File -FilePath "$env:RUNNER_TEMP\new_refresh_token.txt" -Encoding utf8 -NoNewline
@@ -133,33 +132,42 @@ jobs:
             Write-Host "未检测到新的 refresh_token，沿用现有值"
             "NEW_REFRESH_TOKEN_DETECTED=false" >> $env:GITHUB_ENV
         }
-        # ======== 修改点 2 结束 ========
-        
+
         # 直接获取当前用户的 Drive ID
         Write-Host "正在获取 Drive ID..."
         try {
             $headers = @{ Authorization = "Bearer $token" }
             # 获取 /me/drive 信息
             $driveInfo = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/me/drive" -Headers $headers -Method GET
-            
+
             $driveId = $driveInfo.id
             # 硬编码文件夹名，因为你确认它已存在
             $folderName = "ESXi-Custom-ISO"
-            
+
             Write-Host "✓ 驱动信息获取成功:"
             Write-Host "  - Drive ID: $driveId"
             Write-Host "  - 目标文件夹: $folderName"
-            
+
             "driveId=$driveId" >> $env:GITHUB_OUTPUT
             "folderName=$folderName" >> $env:GITHUB_OUTPUT
-            
+
         } catch {
             Write-Error "获取驱动信息失败: $_"
             throw
         }
 
-    # ======== 修改点 3：新增独立步骤，仅在检测到新 refresh_token 时执行，
-    #          用仓库公钥加密后调用 GitHub API 写回 OD_REFRESH_TOKEN 这个 Secret ========
+    # ======== 完善点：Update Refresh Token Secret if Rotated ========
+    # 原逻辑的两个问题：
+    #   1) Python 内嵌脚本一旦失败（网络抖动 / GH API 限流 / AUTH_PAT 权限问题），
+    #      PowerShell 对外部可执行文件的非零退出码默认不会自动中断脚本，
+    #      于是这一步在 Actions 面板上会显示成功（绿色），但 Secret 其实没更新成功。
+    #   2) 没有任何重试，单次失败就彻底放弃。
+    # 完善后：
+    #   - Python 脚本内部对"取公钥"和"写入 Secret"两步做统一重试（最多 3 次，指数退避）；
+    #   - 全部重试失败后 sys.exit(1)，保证退出码可被感知；
+    #   - PowerShell 侧显式读取 $LASTEXITCODE 并在非 0 时 throw，
+    #     让这一步、进而让整个 job 在面板上真正标红，便于及时发现并人工介入；
+    #   - 明文临时文件无论成功失败都会被清理，避免残留在 Runner 磁盘上。
     - name: Update Refresh Token Secret if Rotated
       if: env.NEW_REFRESH_TOKEN_DETECTED == 'true'
       shell: pwsh
@@ -167,16 +175,13 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.AUTH_PAT }}
       run: |
         Write-Host "=== 写回新的 refresh_token 到 GitHub Secrets ==="
-        
+
         $pythonPath = $env:PYTHON_PATH
         $newToken = Get-Content -Path "$env:RUNNER_TEMP\new_refresh_token.txt" -Raw
-        
-        # ======== 修改点 4：修复 YAML 语法报错的根本原因——之前 Python heredoc 里的每一行
-        #          都是顶格写（无缩进），比 run: | 块内其余 PowerShell 代码缩进浅，导致 YAML 
-        #          块状标量提前截断、后续内容被当成非法 YAML 解析。这里把 heredoc 内所有行统一
-        #          缩进到与其余代码一致的层级（8个空格），问题即可解决。========
+
+        # heredoc 内所有行统一缩进到与其余代码一致的层级（8个空格），避免 YAML 块状标量提前截断
         $pyScript = @"
-        import os, requests, base64
+        import os, sys, time, requests, base64
         from nacl import encoding, public
 
         github_token = os.environ['GITHUB_TOKEN']
@@ -188,43 +193,73 @@ jobs:
             'Accept': 'application/vnd.github+json'
         }
 
-        key_resp = requests.get(f'https://api.github.com/repos/{repo}/actions/secrets/public-key', headers=headers)
-        key_resp.raise_for_status()
-        key_data = key_resp.json()
-        public_key = key_data['key']
-        key_id = key_data['key_id']
+        MAX_RETRIES = 3
+        BACKOFF_SEC = 3
 
-        public_key_obj = public.PublicKey(public_key.encode('utf-8'), encoding.Base64Encoder())
-        sealed_box = public.SealedBox(public_key_obj)
-        encrypted = sealed_box.encrypt(new_secret_value.encode('utf-8'))
-        encrypted_b64 = base64.b64encode(encrypted).decode('utf-8')
+        def update_secret():
+            for attempt in range(1, MAX_RETRIES + 1):
+                try:
+                    key_resp = requests.get(
+                        f'https://api.github.com/repos/{repo}/actions/secrets/public-key',
+                        headers=headers, timeout=15
+                    )
+                    key_resp.raise_for_status()
+                    key_data = key_resp.json()
 
-        put_resp = requests.put(
-            f'https://api.github.com/repos/{repo}/actions/secrets/OD_REFRESH_TOKEN',
-            headers=headers,
-            json={'encrypted_value': encrypted_b64, 'key_id': key_id}
-        )
-        put_resp.raise_for_status()
-        print('OK: OD_REFRESH_TOKEN updated')
+                    public_key_obj = public.PublicKey(key_data['key'].encode('utf-8'), encoding.Base64Encoder())
+                    sealed_box = public.SealedBox(public_key_obj)
+                    encrypted = sealed_box.encrypt(new_secret_value.encode('utf-8'))
+                    encrypted_b64 = base64.b64encode(encrypted).decode('utf-8')
+
+                    put_resp = requests.put(
+                        f'https://api.github.com/repos/{repo}/actions/secrets/OD_REFRESH_TOKEN',
+                        headers=headers,
+                        json={'encrypted_value': encrypted_b64, 'key_id': key_data['key_id']},
+                        timeout=15
+                    )
+                    put_resp.raise_for_status()
+                    print(f'OK: OD_REFRESH_TOKEN updated (attempt {attempt}/{MAX_RETRIES})')
+                    return True
+                except Exception as e:
+                    print(f'WARN: attempt {attempt}/{MAX_RETRIES} failed: {e}')
+                    if attempt < MAX_RETRIES:
+                        wait = BACKOFF_SEC * attempt
+                        print(f'    -> retrying in {wait}s...')
+                        time.sleep(wait)
+
+            print('ERROR: OD_REFRESH_TOKEN update failed after all retries')
+            return False
+
+        if not update_secret():
+            sys.exit(1)
         "@
-        # ======== 修改点 4 结束 ========
-        
+
         $pyScript | Out-File -FilePath "$env:RUNNER_TEMP\update_secret.py" -Encoding utf8
-        
+
         $env:NEW_TOKEN_VALUE = $newToken
         & $pythonPath "$env:RUNNER_TEMP\update_secret.py"
-        
-        # 清理临时文件，避免明文残留在 Runner 磁盘上
+
+        # 立刻捕获退出码——必须在下面任何其他命令执行之前，否则 $LASTEXITCODE 会被覆盖
+        $secretUpdateExitCode = $LASTEXITCODE
+
+        # 无论成功与否，先清理明文临时文件，避免残留在 Runner 磁盘上
         Remove-Item -Path "$env:RUNNER_TEMP\new_refresh_token.txt" -Force -ErrorAction SilentlyContinue
         Remove-Item -Path "$env:RUNNER_TEMP\update_secret.py" -Force -ErrorAction SilentlyContinue
-    # ======== 修改点 3 结束 ========
+
+        if ($secretUpdateExitCode -ne 0) {
+            Write-Error "❌ OD_REFRESH_TOKEN 写回 GitHub Secrets 失败（已重试 3 次），请立即人工检查 AUTH_PAT 权限 / 网络状态 / GitHub API 是否正常！"
+            throw "Update Refresh Token Secret step failed with exit code $secretUpdateExitCode"
+        }
+
+        Write-Host "✅ OD_REFRESH_TOKEN 已成功更新到 GitHub Secrets"
+    # ======== 完善点结束 ========
 
     # 步骤二：下载文件（已更新为 Refresh Token 模式）
     - name: Download ESXi Depot Files
       shell: pwsh
       run: |
         Write-Host "=== 下载 ESXi Depot 文件 ==="
-        
+
         # 1. 获取 Token
         $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
         $body = @{
@@ -235,31 +270,31 @@ jobs:
         }
         $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
         $token = ($tokenResponse.access_token).Trim()
-        
+
         $TEMP_DIR = Join-Path $env:TEMP "depots"
         New-Item -ItemType Directory -Path $TEMP_DIR -Force | Out-Null
-        
+
         $files = @(
             "VMware-ESXi-8.0U3b-24280767-depot.zip",
             "nvme-community-driver_1.0.1.0-3vmw.700.1.0.15843807-component-18902434.zip",
             "VMware-Re-Driver_1.101.01-5vmw.800.1.0.20613240.zip",
             "ESXi80U3-VMKUSB-NIC-FLING-75399077-component-24052746.zip"
         )
-        
+
         $headers = @{ Authorization = "Bearer $token" }
         $successCount = 0
         $driveId = "${{ steps.get_drive_info.outputs.driveId }}"
         $folderName = "${{ steps.get_drive_info.outputs.folderName }}"
-        
+
         foreach ($file in $files) {
             # 直接使用路径定位：/drives/{id}/root:/{folder}/{file}:/content
             $downloadUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${folderName}/${file}:/content"
             $outFile = Join-Path $TEMP_DIR $file
-            
+
             Write-Host "下载: $file"
             try {
                 Invoke-RestMethod -Method GET -Uri $downloadUrl -Headers $headers -OutFile $outFile
-                
+
                 if (Test-Path $outFile) {
                     $fileSize = (Get-Item $outFile).Length / 1MB
                     $successCount++
@@ -269,11 +304,11 @@ jobs:
                 Write-Host "✗ $file - $($_.Exception.Message)"
             }
         }
-        
+
         if ($successCount -eq 0) {
             throw "没有文件下载成功，请检查 OneDrive 'ESXi-Custom-ISO' 文件夹内是否有对应文件"
         }
-        
+
         Write-Host "下载完成: $successCount/$($files.Count) 个文件"
 
     - name: Build Custom ESXi ISO
@@ -282,19 +317,19 @@ jobs:
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
         $OutputEncoding = [System.Text.Encoding]::UTF8
-        
+
         Write-Host ""
         Write-Host "================================================"
         Write-Host "ESXi 8.0U3b + RTL8125BG + NVMe + USB NIC"
         Write-Host "================================================"
         Write-Host ""
-        
+
         Import-Module VMware.ImageBuilder
         Write-Host "ImageBuilder 模块已加载"
-        
+
         Get-EsxSoftwareDepot | ForEach-Object { Remove-EsxSoftwareDepot $_ }
         Write-Host "已清除现有 depot"
-        
+
         $TEMP_DIR = Join-Path $env:TEMP "depots"
         $baseDepotZip = Join-Path $TEMP_DIR "VMware-ESXi-8.0U3b-24280767-depot.zip"
         $nvmeDriverZip = Join-Path $TEMP_DIR "nvme-community-driver_1.0.1.0-3vmw.700.1.0.15843807-component-18902434.zip"
@@ -303,7 +338,7 @@ jobs:
             (Join-Path $TEMP_DIR "ESXi80U3-VMKUSB-NIC-FLING-75399077-component-24052746.zip")
         )
         $outIso = Join-Path $TEMP_DIR "ESXi-8.0U3b-24280767-RTL8125BG.iso"
-        
+
         Write-Host "加载 depot 文件..."
         Add-EsxSoftwareDepot -Depot $baseDepotZip
         Add-EsxSoftwareDepot -Depot $nvmeDriverZip
@@ -312,20 +347,20 @@ jobs:
             if (Test-Path $_) { Add-EsxSoftwareDepot -Depot $_ }
         }
         Write-Host "所有 depot 已加载"
-        
+
         $baseProfile = Get-EsxImageProfile | Where-Object { $_.Name -eq "ESXi-8.0U3b-24280767-standard" }
         if (-not $baseProfile) {
             throw "未找到基础镜像配置文件: ESXi-8.0U3b-24280767-standard"
         }
-        
+
         $newProfile = New-EsxImageProfile -CloneProfile $baseProfile -Name "ESXi-8.0U3b-24280767-RTL8125BG" -Vendor "Custom"
         Write-Host "已创建自定义配置文件: $($newProfile.Name)"
-        
+
         $packagesToInject = Get-EsxSoftwarePackage |
             Where-Object { $_.Name -match "re-driver|nvme|vmkusb" } |
             Group-Object -Property Name |
             ForEach-Object { $_.Group | Sort-Object Version -Descending | Select-Object -First 1 }
-        
+
         Write-Host "注入驱动..."
         foreach ($pkg in $packagesToInject) {
             try {
@@ -335,10 +370,10 @@ jobs:
                 Write-Host "已存在: $($pkg.Name)"
             }
         }
-        
+
         Write-Host "导出 ISO..."
         Export-EsxImageProfile -ImageProfile $newProfile -ExportToIso -FilePath $outIso -Force
-        
+
         if (Test-Path $outIso) {
             $sizeMB = (Get-Item $outIso).Length / 1MB
             Write-Host ""
@@ -346,7 +381,7 @@ jobs:
             Write-Host "ISO 路径: $outIso"
             Write-Host "ISO 大小: $([math]::Round($sizeMB, 2)) MB"
             Write-Host ""
-            
+
             "ISO_PATH=$outIso" >> $env:GITHUB_ENV
         } else {
             throw "ISO 创建失败"
@@ -358,19 +393,19 @@ jobs:
       run: |
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
         $OutputEncoding = [System.Text.Encoding]::UTF8
-        
+
         Write-Host "========================================"
         Write-Host "幂等上传策略：检测→删除→上传（纯净版）"
         Write-Host "========================================"
         Write-Host ""
-        
+
         Write-Host "[0/7] 初始化ISO路径（防御性编程）..."
         $isoPath = $env:ISO_PATH
         if ([string]::IsNullOrEmpty($isoPath)) {
             $isoPath = Join-Path (Join-Path $env:TEMP "depots") "ESXi-8.0U3b-24280767-RTL8125BG.iso"
             Write-Host "使用默认ISO路径: $isoPath"
         }
-        
+
         Write-Host ""
         Write-Host "[1/7] 获取全新的上传token..."
         $tokenUrl = "https://login.microsoftonline.com/$env:OD_TENANT_ID/oauth2/v2.0/token"
@@ -380,11 +415,11 @@ jobs:
             refresh_token = $env:OD_REFRESH_TOKEN
             grant_type    = "refresh_token"
         }
-        
+
         try {
             $uploadTokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUrl -Body $body -ContentType "application/x-www-form-urlencoded"
             $uploadToken = ($uploadTokenResponse.access_token).Trim()
-            
+
             if ([string]::IsNullOrEmpty($uploadToken)) {
                 throw "上传用token为空"
             }
@@ -393,48 +428,48 @@ jobs:
             Write-Error "获取上传token失败: $_"
             throw
         }
-        
+
         Write-Host ""
         Write-Host "[2/7] 验证ISO文件..."
-        if (-not (Test-Path $isoPath)) { 
-            throw "ISO 文件不存在: $isoPath" 
+        if (-not (Test-Path $isoPath)) {
+            throw "ISO 文件不存在: $isoPath"
         }
-        
+
         $isoName = "ESXi-8.0U3b-24280767-RTL8125BG.iso"
         $fileInfo = Get-Item $isoPath
         $fileSize = $fileInfo.Length
         Write-Host "✓ ISO文件验证成功:"
         Write-Host "  - 文件名: $isoName"
         Write-Host "  - 文件大小: $([math]::Round($fileSize / 1MB, 2)) MB"
-        
+
         Write-Host ""
         Write-Host "[3/7] 准备路径信息..."
         $driveId = "${{ steps.get_drive_info.outputs.driveId }}"
         $folderName = "${{ steps.get_drive_info.outputs.folderName }}"
-        
+
         Write-Host ""
         Write-Host "[4/7] 构建文件路径..."
-        
+
         $encodedFolderName = [System.Uri]::EscapeDataString($folderName)
         $encodedIsoName = [System.Uri]::EscapeDataString($isoName)
         $fileUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}"
-        
+
         Write-Host "文件完整URL:"
         Write-Host "  $fileUrl"
         Write-Host ""
-        
+
         Write-Host "[5/7] 执行幂等操作：无条件删除现有文件..."
-        
+
         $uploadHeaders = @{ Authorization = "Bearer $uploadToken" }
-        
+
         Write-Host "检查文件是否存在并尝试删除..."
         try {
             Invoke-RestMethod -Uri $fileUrl -Headers $uploadHeaders -Method DELETE
             Write-Host "✅ 文件删除成功（或原本不存在）"
-            
+
             Write-Host "等待 2 秒确保删除操作完成..."
             Start-Sleep -Seconds 2
-            
+
         } catch {
             if ($_.Exception.Response.StatusCode -ne 404) {
                  Write-Host "⚠️ 删除操作异常: $($_.Exception.Message)"
@@ -442,61 +477,61 @@ jobs:
                  Write-Host "✅ 文件原本就不存在"
             }
         }
-        
+
         Write-Host ""
         Write-Host "[6/7] 创建上传会话（纯净请求体）..."
-        
+
         $createUrl = "https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodedFolderName}/${encodedIsoName}:/createUploadSession"
-        
+
         Write-Host "使用稳定上传URL:"
         Write-Host "  $createUrl"
         Write-Host ""
-        
+
         $sessionHeaders = @{
             Authorization = "Bearer $uploadToken"
             "Content-Type" = "application/json"
         }
-        
+
         $bodyJson = @{} | ConvertTo-Json -Compress
-        
+
         try {
             Write-Host "正在发送创建上传会话请求..."
             $session = Invoke-RestMethod -Method POST -Uri $createUrl -Headers $sessionHeaders -Body $bodyJson
-            
+
             if (-not $session.uploadUrl) {
                 throw "响应中未找到 uploadUrl"
             }
-            
+
             $uploadSessionUrl = $session.uploadUrl
             Write-Host ""
             Write-Host "✅ 上传会话创建成功！"
-            
+
             Write-Host ""
             Write-Host "[7/7] 执行分片上传..."
-            
+
             $chunkSize = 3276800 * 10
             $fileStream = [System.IO.File]::OpenRead($isoPath)
             $totalChunks = [math]::Ceiling($fileSize / $chunkSize)
             $bytesUploaded = 0
-            
+
             Write-Host "  - 分片大小: $([math]::Round($chunkSize / 1MB, 2)) MB"
             Write-Host "  - 总块数: $totalChunks"
             Write-Host ""
-            
+
             for ($i = 0; $i -lt $totalChunks; $i++) {
                 $buffer = New-Object byte[] $chunkSize
                 $bytesRead = $fileStream.Read($buffer, 0, $chunkSize)
-                
+
                 if ($bytesRead -eq 0) { break }
-                
+
                 $rangeStart = $bytesUploaded
                 $rangeEnd = $bytesUploaded + $bytesRead - 1
                 $rangeHeader = "bytes $rangeStart-$rangeEnd/$fileSize"
-                
+
                 $retry = 0
                 $maxRetries = 3
                 $success = $false
-                
+
                 while (-not $success -and $retry -lt $maxRetries) {
                     try {
                         $request = [System.Net.HttpWebRequest]::Create($uploadSessionUrl)
@@ -504,11 +539,11 @@ jobs:
                         $request.ContentType = "application/octet-stream"
                         $request.ContentLength = $bytesRead
                         $request.Headers.Add("Content-Range", $rangeHeader)
-                        
+
                         $requestStream = $request.GetRequestStream()
                         $requestStream.Write($buffer, 0, $bytesRead)
                         $requestStream.Close()
-                        
+
                         try {
                             $response = $request.GetResponse()
                             $responseStream = $response.GetResponseStream()
@@ -519,11 +554,11 @@ jobs:
                             $response.Close()
                         } catch {
                         }
-                        
+
                         $progress = [math]::Round(($rangeEnd + 1) / $fileSize * 100, 2)
                         Write-Host "分片 [$($i+1)/$totalChunks]: ✓ 成功 (进度: ${progress}%)"
                         $success = $true
-                        
+
                     } catch {
                         $retry++
                         if ($retry -eq $maxRetries) {
@@ -533,19 +568,19 @@ jobs:
                         Start-Sleep -Seconds 2
                     }
                 }
-                
+
                 $bytesUploaded += $bytesRead
                 if (($i + 1) % 5 -eq 0) {
                     Start-Sleep -Milliseconds 300
                 }
             }
-            
+
             $fileStream.Close()
             Write-Host ""
             Write-Host "========================================"
             Write-Host "✅ 幂等上传完成！"
             Write-Host "========================================"
-            
+
         } catch {
             Write-Host ""
             Write-Host "❌ 上传失败: $($_.Exception.Message)"
@@ -557,13 +592,13 @@ jobs:
       id: check-artifact
       run: |
         Write-Host "=== 检查ISO文件是否存在 ==="
-        
+
         $possiblePaths = @(
             "$env:ISO_PATH",
             "$env:TEMP\depots\ESXi-8.0U3b-24280767-RTL8125BG.iso",
             "$env:RUNNER_TEMP\depots\ESXi-8.0U3b-24280767-RTL8125BG.iso"
         )
-        
+
         $foundPath = $null
         foreach ($path in $possiblePaths) {
             if ($path -and (Test-Path $path)) {
@@ -573,7 +608,7 @@ jobs:
                 break
             }
         }
-        
+
         if ($foundPath) {
             "artifact_path=$foundPath" >> $env:GITHUB_OUTPUT
         } else {
@@ -599,10 +634,10 @@ jobs:
       run: |
         $isoPath = "${{ steps.check-artifact.outputs.artifact_path }}"
         Write-Host "计算ISO文件的SHA256哈希值..."
-        
+
         $hash = (Get-FileHash -Path $isoPath -Algorithm SHA256).Hash
         Write-Host "SHA256: $hash"
-        
+
         "sha256=$hash" >> $env:GITHUB_OUTPUT
 
     # =========================
@@ -615,23 +650,23 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.AUTH_PAT }}
       run: |
         Write-Host "=== 删除旧的GitHub Release（如果存在）==="
-        
+
         $isoPath = "${{ steps.check-artifact.outputs.artifact_path }}"
         $isoName = Split-Path $isoPath -Leaf
         $tagName = $isoName -replace '\.iso$', '' -replace '-RTL8125BG$', ''
         Write-Host "提取的Tag名称: $tagName"
-        
+
         $releasesUrl = "https://api.github.com/repos/${{ github.repository }}/releases"
-        
+
         try {
             Write-Host "获取所有Releases..."
             $releases = Invoke-RestMethod -Uri $releasesUrl -Headers @{
                 Authorization = "Bearer $env:GITHUB_TOKEN"
                 Accept = "application/vnd.github.v3+json"
             }
-            
+
             $oldRelease = $releases | Where-Object { $_.tag_name -eq $tagName } | Select-Object -First 1
-            
+
             if ($oldRelease) {
                 Write-Host "找到旧的Release，删除ID: $($oldRelease.id)..."
                 $deleteUrl = "https://api.github.com/repos/${{ github.repository }}/releases/$($oldRelease.id)"
@@ -640,7 +675,7 @@ jobs:
                     Accept = "application/vnd.github.v3+json"
                 } -Method DELETE
                 Write-Host "✅ 旧Release删除成功"
-                
+
                 Write-Host "删除关联的tag: $tagName"
                 $deleteTagUrl = "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$tagName"
                 try {
