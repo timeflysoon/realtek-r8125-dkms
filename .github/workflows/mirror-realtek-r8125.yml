@@ -1,0 +1,127 @@
+name: Mirror realtek-r8125-dkms
+
+on:
+  workflow_dispatch: # 仅保留手动触发
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # ========================================================
+      # 1. 配置 SSH 环境 (用于推送到目标仓库 88alt)
+      # ========================================================
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY_88ALT: ${{ secrets.SSH_PRIVATE_KEY_88ALT }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          echo "$SSH_PRIVATE_KEY_88ALT" > ~/.ssh/id_rsa_88alt
+          chmod 600 ~/.ssh/id_rsa_88alt
+
+          cat <<EOF > ~/.ssh/config
+          Host github-88alt
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/id_rsa_88alt
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+          EOF
+
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+          echo "✅ SSH配置完成"
+
+      # ========================================================
+      # 2. 执行同步脚本
+      # ========================================================
+      - name: Run Sync Script
+        shell: bash
+        env:
+          PAT: ${{ secrets.AUTH_PAT }}
+        run: |
+          set -e
+
+          # 通用重试函数：retry <最大次数> <间隔秒数> <要执行的命令...>
+          retry() {
+            local max="$1" interval="$2"; shift 2
+            local i
+            for i in $(seq 1 "$max"); do
+              echo "尝试 $i/$max..."
+              if "$@"; then
+                return 0
+              elif [ "$i" -lt "$max" ]; then
+                echo "失败，${interval}秒后重试..."
+                sleep "$interval"
+              fi
+            done
+            return 1
+          }
+
+          # --- 配置区域 ---
+          SOURCE_REPO="https://github.com/timeflysoon/realtek-r8125-dkms.git"
+          MIRROR_DIR="realtek-r8125-dkms.git"
+          TARGET_REPOS=(
+              "git@github-88alt:88alt/realtek-r8125-dkms.git"
+          )
+          AUTH_HEADER="AUTHORIZATION: Basic $(echo -n "x-access-token:$PAT" | base64 -w0)"
+
+          echo "=== 开始同步镜像仓库 $(date '+%Y-%m-%d %H:%M:%S') ==="
+
+          # 1. 克隆源仓库（用 extraheader 传认证信息，避免 PAT 写入 git 配置/URL）
+          echo "正在克隆源仓库..."
+          if ! retry 3 10 git -c http.extraheader="$AUTH_HEADER" clone --mirror "$SOURCE_REPO" "$MIRROR_DIR"; then
+            echo "错误：克隆失败！"
+            exit 1
+          fi
+
+          cd "$MIRROR_DIR" || exit 1
+
+          # 2. 修改 fetch refspec - 只抓取分支和标签
+          echo "配置 fetch refspec..."
+          git config --unset-all remote.origin.fetch 2>/dev/null || true
+          git config --add remote.origin.fetch '+refs/heads/*:refs/heads/*'
+          git config --add remote.origin.fetch '+refs/tags/*:refs/tags/*'
+
+          # 3. 清理残留的 refs
+          echo "清理历史遗留的 PR refs..."
+          git for-each-ref --format='delete %(refname)' refs/pull 2>/dev/null | git update-ref --stdin 2>/dev/null || true
+          git for-each-ref --format='delete %(refname)' refs/remotes/origin/pull 2>/dev/null | git update-ref --stdin 2>/dev/null || true
+
+          # 4. 获取最新更新（clone --mirror 已是最新，此处 fetch --prune 确保没有遗漏）
+          echo "从源仓库获取更新..."
+          if ! retry 2 10 git -c http.extraheader="$AUTH_HEADER" fetch --prune origin; then
+            echo "错误：获取更新失败！"
+            exit 1
+          fi
+
+          # 5. 推送到所有目标仓库
+          for TARGET_REPO in "${TARGET_REPOS[@]}"; do
+              ALIAS=$(echo "$TARGET_REPO" | cut -d'@' -f2 | cut -d':' -f1)
+              echo "------------------------------------------------------"
+              echo "正在推送到: $ALIAS"
+
+              if retry 2 5 timeout 300 git push --mirror "$TARGET_REPO"; then
+                  echo "✓ 推送成功"
+              else
+                  echo "✗ 推送失败（已达最大重试次数）"
+                  exit 1
+              fi
+          done
+
+          echo "=== 同步完成 $(date '+%Y-%m-%d %H:%M:%S') ==="
+
+      # ========================================================
+      # 3. 清理敏感数据
+      # ========================================================
+      - name: Cleanup SSH
+        if: always()
+        run: |
+          rm -f ~/.ssh/id_rsa_88alt ~/.ssh/config ~/.ssh/known_hosts
+          echo "✅ 敏感数据清理完成"
