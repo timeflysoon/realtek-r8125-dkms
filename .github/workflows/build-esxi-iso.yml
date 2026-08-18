@@ -1,9 +1,18 @@
 name: Build ESXi ISO (Cloud Only)
 
+# 同一份文件部署到多个账号的仓库时,自动识别当前账号专属的 AUTH_PAT:
+# secret 命名规则固定为 AUTH_PAT_<账号名大写>,例如 timeflysoon → AUTH_PAT_TIMEFLYSOON,
+# 88alt → AUTH_PAT_88ALT。脚本用 $GITHUB_REPOSITORY_OWNER(当前仓库所属账号)自动拼出
+# 这个名字去查找,不需要在文件里写死任何账号名,复制到别的账号仓库也能直接用。
+#
+# 注意：OD_CLIENT_ID / OD_CLIENT_SECRET / OD_TENANT_ID / OD_REFRESH_TOKEN 这几个
+# OneDrive 相关 Secret 名称不变、不做自动识别，按你自己的 OneDrive 租户情况各仓库
+# 自行配置即可。
+
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 0 * * 0" # 每周日 UTC 0点 执行
+  # schedule:
+  #   - cron: "0 0 * * 0" # 每周日 UTC 0点 执行
 
 jobs:
   build:
@@ -16,10 +25,36 @@ jobs:
       # SHARED_LINK 已移除，改用直接路径 ESXi-Custom-ISO
 
     steps:
+    # 0. 解析当前账号专属 Token（必须放在 checkout 之前，因为 checkout 也要用它）
+    - name: 解析当前账号专属 Token
+      id: resolve-token
+      shell: pwsh
+      env:
+        ALL_SECRETS_JSON: ${{ toJSON(secrets) }}
+      run: |
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+        $owner = $env:GITHUB_REPOSITORY_OWNER
+        # 账号名转大写并把非字母数字字符替换成下划线,拼出该账号专属 secret 名
+        $ownerKey = ($owner.ToUpper() -replace '[^A-Z0-9]', '_')
+        $secretName = "AUTH_PAT_$ownerKey"
+
+        $allSecrets = $env:ALL_SECRETS_JSON | ConvertFrom-Json
+        $token = $allSecrets.$secretName
+
+        if ([string]::IsNullOrEmpty($token)) {
+            Write-Error "❌ 未找到 secret $secretName，请在本仓库 Settings → Secrets and variables → Actions 中添加，值为 $owner 账号的 classic PAT（需 repo 权限）"
+            exit 1
+        }
+
+        Write-Host "::add-mask::$token"
+        "GH_TOKEN=$token" >> $env:GITHUB_ENV
+        Write-Host "✅ 已识别账号 $owner 的专属 Token($secretName)"
+
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        token: ${{ secrets.AUTH_PAT }}
+        token: ${{ env.GH_TOKEN }}
 
     # 1. 关键步骤：使用 setup-python 确保指定版本被下载并解压到 hostedtoolcache
     - name: Ensure Python 3.12.10 Exists
@@ -172,7 +207,7 @@ jobs:
       if: env.NEW_REFRESH_TOKEN_DETECTED == 'true'
       shell: pwsh
       env:
-        GITHUB_TOKEN: ${{ secrets.AUTH_PAT }}
+        GITHUB_TOKEN: ${{ env.GH_TOKEN }}
       run: |
         Write-Host "=== 写回新的 refresh_token 到 GitHub Secrets ==="
 
@@ -616,6 +651,7 @@ jobs:
         }
 
     - name: Upload to GitHub Artifacts (Conditional)
+      id: upload-artifact
       if: steps.check-artifact.outputs.artifact_path != ''
       uses: actions/upload-artifact@v4
       with:
@@ -647,7 +683,7 @@ jobs:
       if: steps.check-artifact.outputs.artifact_path != ''
       shell: pwsh
       env:
-        GITHUB_TOKEN: ${{ secrets.AUTH_PAT }}
+        GITHUB_TOKEN: ${{ env.GH_TOKEN }}
       run: |
         Write-Host "=== 删除旧的GitHub Release（如果存在）==="
 
@@ -701,7 +737,7 @@ jobs:
       if: steps.check-artifact.outputs.artifact_path != ''
       uses: softprops/action-gh-release@v2
       env:
-        GITHUB_TOKEN: ${{ secrets.AUTH_PAT }}
+        GITHUB_TOKEN: ${{ env.GH_TOKEN }}
       with:
         tag_name: ESXi-8.0U3b-24280767
         name: ESXi 8.0U3b Custom ISO with RTL8125BG Driver
@@ -725,3 +761,14 @@ jobs:
         Write-Host "📦 Artifact 名称: ESXi-8.0U3b-RTL8125BG-ISO"
         Write-Host "🔗 下载链接可在 GitHub Actions 页面查看"
         Write-Host "========================================"
+
+# ══════════════════════════════════════════════
+# 配置说明
+# ══════════════════════════════════════════════
+# 1. 添加 Secret：本仓库 → Settings → Secrets → Actions
+#    名称固定为 AUTH_PAT_<账号名大写>，例如账号 timeflysoon → AUTH_PAT_TIMEFLYSOON，
+#    账号 88alt → AUTH_PAT_88ALT。建议权限：repo（写 Secret + 管理 Release 都需要）
+#
+# 2. OD_CLIENT_ID / OD_CLIENT_SECRET / OD_TENANT_ID / OD_REFRESH_TOKEN 仍按各仓库
+#    实际对应的 OneDrive 租户单独配置，与账号名无关，不做自动识别。
+# ══════════════════════════════════════════════
