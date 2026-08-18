@@ -1,8 +1,8 @@
 name: Mirror realtek-r8125-dkms
 
 # 同一份文件部署到多个账号的仓库时，自动识别当前账号专属的 secret：
-#   - 克隆上游用的 PAT      → AUTH_PAT_<账号名大写>          例：timeflysoon → AUTH_PAT_TIMEFLYSOON
-#   - 推送镜像用的部署密钥  → SSH_PRIVATE_KEY_<账号名大写>   例：88alt      → SSH_PRIVATE_KEY_88ALT
+#   - 克隆上游用的 PAT  → AUTH_PAT_<账号名大写>   例：timeflysoon → AUTH_PAT_TIMEFLYSOON
+#   - 推送镜像用的部署密钥  → SSH_PRIVATE_KEY_<账号名大写>   例：88alt → SSH_PRIVATE_KEY_88ALT
 # 脚本用 $GITHUB_REPOSITORY_OWNER（当前仓库所属账号）自动拼出这两个 secret 名，
 # 不需要在文件里写死任何账号名，复制到别的账号仓库也能直接用——
 # 只需要在对应账号的仓库里按上面的命名规则手动添加好这两个 secret 即可。
