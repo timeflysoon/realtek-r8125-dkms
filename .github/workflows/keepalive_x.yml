@@ -1,4 +1,10 @@
 name: X-Account Auto KeepAlive
+
+# 同一份文件部署到多个账号的仓库时，自动识别当前账号专属的 AUTH_PAT：
+# secret 命名规则固定为 AUTH_PAT_<账号名大写>，例如 timeflysoon → AUTH_PAT_TIMEFLYSOON，
+# 88alt → AUTH_PAT_88ALT。脚本用 $GITHUB_REPOSITORY_OWNER（当前仓库所属账号）自动拼出
+# 这个名字去查找，不需要在文件里写死任何账号名，复制到别的账号仓库也能直接用。
+
 on:
   schedule:
     - cron: '30 2,8,14,20 * * *'   # UTC 时间
@@ -7,18 +13,48 @@ jobs:
   run-x-account:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
       - name: Install Dependencies
         run: pip install requests pynacl
+
+      # ========================================================
+      # 解析当前账号专属的 AUTH_PAT
+      # ========================================================
+      - name: Resolve account-specific AUTH_PAT
+        id: resolve-pat
+        shell: bash
+        env:
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+        run: |
+          set -Eeuo pipefail
+
+          OWNER="$GITHUB_REPOSITORY_OWNER"
+          # 账号名转大写并把非字母数字字符压缩成单个下划线，避免出现多余的 "_"
+          OWNER_KEY=$(printf '%s' "$OWNER" | tr '[:lower:]' '[:upper:]' | tr -cs '[:alnum:]' '_')
+          SECRET_NAME_TO_FIND="AUTH_PAT_${OWNER_KEY}"
+
+          PAT_VALUE=$(printf '%s' "$ALL_SECRETS" | jq -r --arg k "$SECRET_NAME_TO_FIND" '.[$k] // empty')
+
+          if [ -z "$PAT_VALUE" ]; then
+            echo "❌ 未找到 secret ${SECRET_NAME_TO_FIND}"
+            echo "请在本仓库 Settings → Secrets and variables → Actions 中添加，值为 ${OWNER} 账号的 PAT"
+            exit 1
+          fi
+
+          echo "::add-mask::$PAT_VALUE"
+          echo "GH_PAT_RESOLVED=$PAT_VALUE" >> "$GITHUB_ENV"
+          echo "✅ 已识别账号 ${OWNER} 的专属 Token（${SECRET_NAME_TO_FIND}）"
+
       - name: Random Delay
         shell: bash
         run: |
@@ -29,6 +65,7 @@ jobs:
             echo "错峰执行，随机等待 ${WAIT_SEC} 秒..."
             sleep $WAIT_SEC
           fi
+
       - name: Run Script for Account X
         env:
           GITHUB_REPO_NAME: ${{ github.repository }}
@@ -36,6 +73,6 @@ jobs:
           CLIENT_SECRET: ${{ secrets.OD_CLIENT_SECRET }}
           REFRESH_TOKEN: ${{ secrets.OD_REFRESH_TOKEN }}
           TENANT_ID: ${{ secrets.OD_TENANT_ID }}
-          GH_PAT: ${{ secrets.AUTH_PAT }}
+          GH_PAT: ${{ env.GH_PAT_RESOLVED }}
           SECRET_NAME: OD_REFRESH_TOKEN
         run: python main.py
