@@ -1,5 +1,17 @@
 name: Mirror realtek-r8125-dkms
 
+# 同一份文件部署到多个账号的仓库时，自动识别当前账号专属的 secret：
+#   - 克隆上游用的 PAT      → AUTH_PAT_<账号名大写>          例：timeflysoon → AUTH_PAT_TIMEFLYSOON
+#   - 推送镜像用的部署密钥  → SSH_PRIVATE_KEY_<账号名大写>   例：88alt      → SSH_PRIVATE_KEY_88ALT
+# 脚本用 $GITHUB_REPOSITORY_OWNER（当前仓库所属账号）自动拼出这两个 secret 名，
+# 不需要在文件里写死任何账号名，复制到别的账号仓库也能直接用——
+# 只需要在对应账号的仓库里按上面的命名规则手动添加好这两个 secret 即可。
+#
+# 注意：镜像目标固定为"当前仓库自身"（$GITHUB_REPOSITORY），即把上游
+# timeflysoon/realtek-r8125-dkms 的更新 mirror 回本仓库。因此每个账号仓库都需要：
+#   1. 给自己仓库生成一把部署密钥（Deploy key），务必勾选 "Allow write access"
+#   2. 私钥内容存为该账号的 SSH_PRIVATE_KEY_<账号名大写> secret
+
 on:
   workflow_dispatch: # 仅保留手动触发
 
@@ -13,23 +25,65 @@ jobs:
 
     steps:
       # ========================================================
-      # 1. 配置 SSH 环境 (用于推送到目标仓库 88alt)
+      # 0. 解析当前账号专属的 Secret（AUTH_PAT / SSH 部署密钥）
+      # ========================================================
+      - name: Resolve account-specific secrets
+        id: resolve-secrets
+        shell: bash
+        env:
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+        run: |
+          set -Eeuo pipefail
+
+          OWNER="$GITHUB_REPOSITORY_OWNER"
+          # 账号名转大写并把非字母数字字符压缩成单个下划线，避免出现多余的 "_"
+          OWNER_KEY=$(printf '%s' "$OWNER" | tr '[:lower:]' '[:upper:]' | tr -cs '[:alnum:]' '_')
+
+          PAT_NAME="AUTH_PAT_${OWNER_KEY}"
+          SSH_NAME="SSH_PRIVATE_KEY_${OWNER_KEY}"
+
+          PAT_VALUE=$(printf '%s' "$ALL_SECRETS" | jq -r --arg k "$PAT_NAME" '.[$k] // empty')
+          SSH_VALUE=$(printf '%s' "$ALL_SECRETS" | jq -r --arg k "$SSH_NAME" '.[$k] // empty')
+
+          if [ -z "$PAT_VALUE" ]; then
+            echo "❌ 未找到 secret ${PAT_NAME}"
+            echo "请在本仓库 Settings → Secrets and variables → Actions 中添加，值为 ${OWNER} 账号的 PAT（需 repo 读权限即可）"
+            exit 1
+          fi
+          if [ -z "$SSH_VALUE" ]; then
+            echo "❌ 未找到 secret ${SSH_NAME}"
+            echo "请在本仓库 Settings → Secrets and variables → Actions 中添加，值为本仓库的部署密钥私钥（需勾选 Allow write access）"
+            exit 1
+          fi
+
+          echo "::add-mask::$PAT_VALUE"
+          echo "::add-mask::$SSH_VALUE"
+
+          echo "GH_AUTH_PAT=$PAT_VALUE" >> "$GITHUB_ENV"
+          {
+            echo "GH_SSH_KEY<<SSHKEY_EOF"
+            echo "$SSH_VALUE"
+            echo "SSHKEY_EOF"
+          } >> "$GITHUB_ENV"
+
+          echo "✅ 已识别账号 ${OWNER} 的专属 Secret（${PAT_NAME} / ${SSH_NAME}）"
+
+      # ========================================================
+      # 1. 配置 SSH 环境（用于推送镜像回本仓库）
       # ========================================================
       - name: Configure SSH
-        env:
-          SSH_PRIVATE_KEY_88ALT: ${{ secrets.SSH_PRIVATE_KEY_88ALT }}
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
 
-          echo "$SSH_PRIVATE_KEY_88ALT" > ~/.ssh/id_rsa_88alt
-          chmod 600 ~/.ssh/id_rsa_88alt
+          echo "$GH_SSH_KEY" > ~/.ssh/id_rsa_target
+          chmod 600 ~/.ssh/id_rsa_target
 
           cat <<EOF > ~/.ssh/config
-          Host github-88alt
+          Host github-target
             HostName github.com
             User git
-            IdentityFile ~/.ssh/id_rsa_88alt
+            IdentityFile ~/.ssh/id_rsa_target
             IdentitiesOnly yes
             StrictHostKeyChecking yes
           EOF
@@ -43,8 +97,6 @@ jobs:
       # ========================================================
       - name: Run Sync Script
         shell: bash
-        env:
-          PAT: ${{ secrets.AUTH_PAT }}
         run: |
           set -e
 
@@ -67,12 +119,14 @@ jobs:
           # --- 配置区域 ---
           SOURCE_REPO="https://github.com/timeflysoon/realtek-r8125-dkms.git"
           MIRROR_DIR="realtek-r8125-dkms.git"
+          # 镜像目标 = 本仓库自身，$GITHUB_REPOSITORY 本身就是 "owner/repo" 格式
           TARGET_REPOS=(
-              "git@github-88alt:88alt/realtek-r8125-dkms.git"
+              "git@github-target:${GITHUB_REPOSITORY}.git"
           )
-          AUTH_HEADER="AUTHORIZATION: Basic $(echo -n "x-access-token:$PAT" | base64 -w0)"
+          AUTH_HEADER="AUTHORIZATION: Basic $(echo -n "x-access-token:$GH_AUTH_PAT" | base64 -w0)"
 
           echo "=== 开始同步镜像仓库 $(date '+%Y-%m-%d %H:%M:%S') ==="
+          echo "目标仓库: ${TARGET_REPOS[*]}"
 
           # 1. 克隆源仓库（用 extraheader 传认证信息，避免 PAT 写入 git 配置/URL）
           echo "正在克隆源仓库..."
@@ -101,7 +155,7 @@ jobs:
             exit 1
           fi
 
-          # 5. 推送到所有目标仓库
+          # 5. 推送到目标仓库
           for TARGET_REPO in "${TARGET_REPOS[@]}"; do
               ALIAS=$(echo "$TARGET_REPO" | cut -d'@' -f2 | cut -d':' -f1)
               echo "------------------------------------------------------"
@@ -123,5 +177,5 @@ jobs:
       - name: Cleanup SSH
         if: always()
         run: |
-          rm -f ~/.ssh/id_rsa_88alt ~/.ssh/config ~/.ssh/known_hosts
+          rm -f ~/.ssh/id_rsa_target ~/.ssh/config ~/.ssh/known_hosts
           echo "✅ 敏感数据清理完成"
