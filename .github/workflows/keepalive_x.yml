@@ -6,8 +6,8 @@ name: X-Account Auto KeepAlive
 # 这个名字去查找，不需要在文件里写死任何账号名，复制到别的账号仓库也能直接用。
 
 on:
-  schedule:
-    - cron: '30 2,8,14,20 * * *'   # UTC 时间
+  # schedule:
+  #   - cron: '30 2,8,14,20 * * *'   # UTC 时间
   workflow_dispatch: {}
 jobs:
   run-x-account:
