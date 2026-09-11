@@ -6,8 +6,8 @@ name: Z-Account Auto KeepAlive
 # 这个名字去查找，不需要在文件里写死任何账号名，复制到别的账号仓库也能直接用。
 
 on:
-  schedule:
-    - cron: '0 */6 * * *'   # UTC 每6小时
+  # schedule:
+  #   - cron: '0 */6 * * *'   # UTC 每6小时
   workflow_dispatch: {}
 jobs:
   run-z-account:
